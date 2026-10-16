@@ -6,8 +6,11 @@
   interface Props {
     /** Reviewed story image sent by the server (manifest + alt text). */
     image: StoryImage;
-    /** `background` spans the panel; `portrait` is a small framed picture. */
-    kind: 'background' | 'portrait';
+    /**
+     * `background` spans the panel; `portrait` is a small framed picture;
+     * `line` is the smaller portrait beside a dialogue line.
+     */
+    kind: 'background' | 'portrait' | 'line';
     /** Show the alt text as plain text when the picture is not available. */
     fallbackText?: boolean;
     lang?: string;
@@ -38,7 +41,9 @@
     return () => controller.abort();
   });
 
-  const sizes = $derived(kind === 'background' ? '(min-width: 58rem) 65vw, 100vw' : '8rem');
+  const sizes = $derived(
+    kind === 'background' ? '(min-width: 58rem) 65vw, 100vw' : kind === 'line' ? '4rem' : '8rem',
+  );
 </script>
 
 {#if loaded && !failed}
@@ -85,6 +90,16 @@
 
   .story-image-portrait img {
     width: 6rem;
+    aspect-ratio: 1;
+    object-fit: cover;
+  }
+
+  .story-image-line {
+    flex: 0 0 auto;
+  }
+
+  .story-image-line img {
+    width: 3.5rem;
     aspect-ratio: 1;
     object-fit: cover;
   }

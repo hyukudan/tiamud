@@ -14,6 +14,7 @@
   import AccountAccess from './components/AccountAccess.svelte';
   import PreferencesPanel from './components/PreferencesPanel.svelte';
   import StoryPanel from './components/StoryPanel.svelte';
+  import StoryPicker from './components/StoryPicker.svelte';
   import { PRODUCT_NAME } from './lib/brand';
   import type { CharacterSelection } from './lib/auth';
   import {
@@ -114,6 +115,9 @@
   });
 
   const showMultimedia = $derived(multimediaAllowed(preferences));
+  /** The reader's ordered languages, for the story picker's default. */
+  const preferredLanguages: readonly string[] =
+    typeof navigator === 'undefined' ? [] : (navigator.languages ?? [navigator.language]);
   const systemReducedMotion = systemReducedMotionNow();
   const reduceVisualMotion = $derived(motionReduced(preferences, systemReducedMotion));
 
@@ -295,6 +299,14 @@
       <p class:connected={session.connectionState === 'connected'} class="connection" role="status">
         <span aria-hidden="true"></span>{connectionLabel}
       </p>
+      {#if !session.story}
+        <button
+          type="button"
+          aria-expanded={Boolean(session.storyCatalog)}
+          disabled={session.connectionState !== 'connected' || session.storyCatalogPending}
+          onclick={() => (session.storyCatalog ? session.closeStoryCatalog() : session.openStoryCatalog())}
+        >Stories</button>
+      {/if}
       <button type="button" onclick={() => void session.signOut()}>Sign out</button>
       <PreferencesPanel value={preferences} onchange={updatePreferences} />
     </div>
@@ -322,6 +334,15 @@
 
   <main>
     <section class="scene" aria-labelledby="scene-title">
+      {#if session.storyCatalog && !session.story}
+        <StoryPicker
+          stories={session.storyCatalog}
+          connected={session.connectionState === 'connected'}
+          preferred={preferredLanguages}
+          onenter={session.enterStory}
+          onclose={session.closeStoryCatalog}
+        />
+      {/if}
       {#if session.story}
         <!-- While absorbed in a story the character stays parked in its room. -->
         <StoryPanel

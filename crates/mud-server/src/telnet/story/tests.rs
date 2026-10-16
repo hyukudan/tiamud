@@ -66,6 +66,56 @@ fn drain(output: &TelnetOutputQueue) -> (String, Vec<String>) {
 }
 
 #[tokio::test]
+async fn telnet_lists_story_languages_and_speaks_the_session_locale() {
+    let pack = |name: &str| {
+        let bytes = std::fs::read(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join(format!("../story-core/fixtures/{name}.story.json")),
+        )
+        .unwrap();
+        StoryPack::from_json_slice(&bytes).unwrap()
+    };
+    let manager = StoryManager::new(
+        StoryCatalog::from_packs(vec![pack(CRIPTA), pack("lluvia-de-neon")], BTreeMap::new())
+            .unwrap(),
+        StoryLimits::default(),
+    );
+    let output = TelnetOutputQueue::new(256, 1024 * 1024);
+    let mut input = TelnetInput::default();
+    let mut story = TelnetStory::new(Some(manager), AccountId(9));
+    story.line(&output, &mut input, "historias").await.unwrap();
+    let listing = drain(&output).0;
+    assert!(listing.contains("lluvia-de-neon — Lluvia de neón [es, en]"));
+    assert!(listing.contains("«historia <id> <idioma>»"));
+
+    story
+        .line(&output, &mut input, "historia lluvia-de-neon en")
+        .await
+        .unwrap();
+    let (text, _) = drain(&output);
+    assert!(text.contains("You enter «Neon Rain»."));
+    assert!(text.contains("[Turn 0 · Score 0]"));
+    assert!(text.contains("Type a number to choose"));
+    story.line(&output, &mut input, "99").await.unwrap();
+    assert!(drain(&output).0.contains("That option is not available."));
+    story.line(&output, &mut input, "dance").await.unwrap();
+    assert!(drain(&output).0.contains("You are absorbed in a story"));
+    story.line(&output, &mut input, "deshacer").await.unwrap();
+    assert!(drain(&output).0.contains("There is nothing left to undo."));
+    story.line(&output, &mut input, "historias").await.unwrap();
+    assert!(drain(&output).0.starts_with("Available stories:"));
+    assert_eq!(
+        story.line(&output, &mut input, "leave").await.unwrap(),
+        StoryLineOutcome::Left
+    );
+    assert!(
+        drain(&output)
+            .0
+            .contains("You leave the story and return to the world.")
+    );
+}
+
+#[tokio::test]
 async fn telnet_plays_by_number_undoes_and_leaves() {
     let output = TelnetOutputQueue::new(256, 1024 * 1024);
     let mut input = TelnetInput::default();
@@ -82,7 +132,7 @@ async fn telnet_plays_by_number_undoes_and_leaves() {
     assert!(
         drain(&output)
             .0
-            .contains("cripta-del-nigromante — La cripta del nigromante")
+            .contains("cripta-del-nigromante — La cripta del nigromante [es]")
     );
 
     story
@@ -303,6 +353,7 @@ fn oversized_gmcp_story_summary_degrades_within_the_limit() {
     let view = StoryProjection {
         story_id: "x".into(),
         title: "t".repeat(200),
+        locale: "es".into(),
         view_rev: 4,
         turn: 1,
         score: 0,

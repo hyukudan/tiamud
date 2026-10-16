@@ -651,6 +651,7 @@ fn tallies_and_lobbies_render_as_text() {
     let view = StoryProjection {
         story_id: CRIPTA.into(),
         title: "Cripta".into(),
+        locale: "es".into(),
         view_rev: 1,
         turn: 0,
         score: 0,
@@ -675,8 +676,8 @@ fn tallies_and_lobbies_render_as_text() {
     };
     let text = render_tally(&frame.tally_at(BRUNO, now), &view).unwrap();
     assert_eq!(text, "Votos (1/2): 2) 1 · cierra en 30 s · tu voto: 2");
-    let lobby = render_lobby(&frame.lobby(HOST));
+    let lobby = render_lobby(&frame.lobby(HOST), "es");
     assert!(lobby.contains("Código para unirse: ABCD2345"));
     assert!(lobby.contains("1. Aria (anfitrión)"));
-    assert!(!render_lobby(&frame.lobby(BRUNO)).contains("ABCD2345"));
+    assert!(!render_lobby(&frame.lobby(BRUNO), "es").contains("ABCD2345"));
 }

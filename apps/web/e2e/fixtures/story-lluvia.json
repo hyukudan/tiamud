@@ -1009,12 +1009,20 @@
             },
             {
               "kind": "line",
+              "portrait": {
+                "alt": "Silueta de Lola, una mujer con melena corta, recortada contra un neón rosa en la noche verdeazulada.",
+                "manifest": "/assets/1397e02d05d58ed08bc4c75411dc5d9c8a1dd89246cbb476fd109ed23247e1fc/manifest.json"
+              },
               "speaker": "Lola",
               "text": "—Otra vez la pasma.",
               "type": "block"
             },
             {
               "kind": "line",
+              "portrait": {
+                "alt": "Silueta de Lola, una mujer con melena corta, recortada contra un neón rosa en la noche verdeazulada.",
+                "manifest": "/assets/1397e02d05d58ed08bc4c75411dc5d9c8a1dd89246cbb476fd109ed23247e1fc/manifest.json"
+              },
               "speaker": "Lola",
               "text": "—¿Qué te pongo, detective?",
               "type": "block"
@@ -1086,6 +1094,10 @@
             },
             {
               "kind": "line",
+              "portrait": {
+                "alt": "Silueta de Lola, una mujer con melena corta, recortada contra un neón rosa en la noche verdeazulada.",
+                "manifest": "/assets/1397e02d05d58ed08bc4c75411dc5d9c8a1dd89246cbb476fd109ed23247e1fc/manifest.json"
+              },
               "speaker": "Lola",
               "text": "—Si tienes algo que enseñarme, ahora te escucho.",
               "type": "block"
@@ -1141,6 +1153,10 @@
             },
             {
               "kind": "line",
+              "portrait": {
+                "alt": "Silueta de Lola, una mujer con melena corta, recortada contra un neón rosa en la noche verdeazulada.",
+                "manifest": "/assets/1397e02d05d58ed08bc4c75411dc5d9c8a1dd89246cbb476fd109ed23247e1fc/manifest.json"
+              },
               "speaker": "Lola",
               "text": "—¿Qué te pongo, detective?",
               "type": "block"
@@ -1761,6 +1777,10 @@
             },
             {
               "kind": "line",
+              "portrait": {
+                "alt": "Silueta de Dámaso, un hombre corpulento con sombrero de ala ancha, recortada contra una luz ámbar.",
+                "manifest": "/assets/8432f72a44714fd24b61af713105a731edb0002022ba313632ba7acb914c577c/manifest.json"
+              },
               "speaker": "Dámaso",
               "text": "—Este callejón es mío, poli. ¿Qué quieres?",
               "type": "block"

@@ -11,10 +11,10 @@ use std::sync::Arc;
 
 use super::{OutboundHandle, OutboundPriority, queue_action_result, queue_sequenced};
 use crate::story_sessions::{
-    CommandFollowUp, InvitationInbox, SHARED_STORY_HELP, STORY_INPUT_HELP, STORY_LOCALE,
-    SharedFrame, StoryCommand, StoryFailure, StoryInputCommand, StoryLink, StoryManager,
-    StoryProjection, StoryRequest, parse_parser_story_input, parse_story_command,
-    parse_story_input, render_listing, render_lobby, render_slots,
+    CommandFollowUp, InvitationInbox, STORY_LOCALE, SharedFrame, StoryCommand, StoryFailure,
+    StoryInputCommand, StoryLink, StoryManager, StoryProjection, StoryRequest, catalog_parts,
+    messages, parse_parser_story_input, parse_story_command, parse_story_input, render_listing,
+    render_lobby, render_slots,
 };
 use tiamud_core::AccountId;
 use tiamud_protocol::{self as protocol, ServerMessageType, StoryDecisionMode, StoryLeftReason};
@@ -78,6 +78,11 @@ impl WebStorySession {
     /// True while input is routed to a story instance.
     pub(super) fn active(&self) -> bool {
         self.link.is_some()
+    }
+
+    /// Language of the current story instance (Spanish outside a story).
+    pub(super) fn locale(&self) -> &str {
+        self.link.as_ref().map_or(STORY_LOCALE, StoryLink::locale)
     }
 
     fn set_link(&mut self, link: StoryLink) {
@@ -497,6 +502,15 @@ impl WebStorySession {
         }
     }
 
+    /// `story.catalog {}`: every story with its languages, in as many
+    /// `story.catalog` parts as the frame budget needs.
+    pub(super) fn catalog(&self, outbound: &OutboundHandle, sequence: &mut u64) -> bool {
+        match &self.manager {
+            Some(manager) => queue_catalog(outbound, sequence, manager),
+            None => queue_error(outbound, sequence, StoryFailure::Disabled),
+        }
+    }
+
     /// After entering a fresh instance: the slot listing with the continue
     /// offer. Nothing is sent without a store or on a listing failure.
     async fn offer(&mut self, outbound: &OutboundHandle, sequence: &mut u64) -> bool {
@@ -545,18 +559,22 @@ impl WebStorySession {
             )
         };
         Some(match command {
-            StoryCommand::List => queue_action_result(
-                outbound,
-                sequence,
-                request_id,
-                true,
-                Some(render_listing(&manager.listing())),
-            ),
+            // The text listing answers the command; the typed catalog
+            // lets the browser offer a language picker.
+            StoryCommand::List => {
+                queue_action_result(
+                    outbound,
+                    sequence,
+                    request_id,
+                    true,
+                    Some(render_listing(&manager.listing(), STORY_LOCALE)),
+                ) && queue_catalog(outbound, sequence, &manager)
+            }
             StoryCommand::Leave => failed(StoryFailure::NotInStory, outbound, sequence),
             StoryCommand::Enter(story_id, locale) => {
                 match manager.enter_in(self.account, &story_id, locale.as_deref()) {
                     Ok(link) => {
-                        let message = format!("Entras en «{}».", link.title());
+                        let message = messages::entered(link.locale(), link.title());
                         self.set_link(link.clone());
                         queue_action_result(outbound, sequence, request_id, true, Some(message))
                             && queue_entered(outbound, sequence, &link)
@@ -573,10 +591,13 @@ impl WebStorySession {
                 {
                     Ok(link) => {
                         let message = format!(
-                            "Compartes «{}». {}",
-                            link.title(),
+                            "{} {}",
+                            messages::hosting(link.locale(), link.title()),
                             link.frames()
-                                .map(|frames| render_lobby(&frames.borrow().lobby(self.account)))
+                                .map(|frames| render_lobby(
+                                    &frames.borrow().lobby(self.account),
+                                    link.locale()
+                                ))
                                 .unwrap_or_default()
                         );
                         self.set_link(link.clone());
@@ -593,11 +614,7 @@ impl WebStorySession {
                     .await
                 {
                     Ok(link) => {
-                        let message = if spectate {
-                            format!("Miras «{}» como espectador.", link.title())
-                        } else {
-                            format!("Te unes a «{}».", link.title())
-                        };
+                        let message = messages::joined(link.locale(), link.title(), spectate);
                         self.set_link(link.clone());
                         queue_action_result(outbound, sequence, request_id, true, Some(message))
                             && queue_entered(outbound, sequence, &link)
@@ -631,6 +648,8 @@ impl WebStorySession {
                 sequence,
             );
         };
+        let locale = link.locale().to_owned();
+        let locale = locale.as_str();
         let parsed = if link.is_parser() {
             parse_parser_story_input(text)
         } else {
@@ -657,7 +676,7 @@ impl WebStorySession {
                 let Some((request, label, view_rev)) = action else {
                     return result(
                         false,
-                        StoryFailure::UnknownChoice.message(),
+                        StoryFailure::UnknownChoice.message_in(locale),
                         outbound,
                         sequence,
                     );
@@ -665,11 +684,7 @@ impl WebStorySession {
                 let voting = self
                     .frame()
                     .is_some_and(|frame| frame.table.mode() == StoryDecisionMode::Vote);
-                let message = if voting {
-                    format!("Votas por: {label}")
-                } else {
-                    format!("Eliges: {label}")
-                };
+                let message = messages::chose(locale, &label, voting);
                 result(true, &message, outbound, sequence)
                     && self.input(outbound, sequence, request, view_rev).await
             }
@@ -683,49 +698,50 @@ impl WebStorySession {
                     None => None,
                 });
                 let Some((leaf, view_rev)) = target else {
-                    return result(false, SHARED_STORY_HELP, outbound, sequence);
+                    return result(false, messages::shared_help(locale), outbound, sequence);
                 };
-                let message = if leaf.is_some() {
-                    "Votas."
-                } else {
-                    "Retiras tu voto."
-                };
+                let message = messages::voted(locale, leaf.is_none());
                 result(true, message, outbound, sequence)
                     && self.vote(outbound, sequence, leaf, view_rev).await
             }
             StoryInputCommand::Undo => {
-                result(true, "Deshaces la última elección.", outbound, sequence)
+                result(true, messages::undone(locale), outbound, sequence)
                     && self.undo(outbound, sequence).await
             }
             StoryInputCommand::Leave => {
-                result(true, "Sales de la historia.", outbound, sequence)
+                result(true, messages::leaving(locale), outbound, sequence)
                     && self.leave(outbound, sequence).await
             }
             StoryInputCommand::Look => {
-                result(true, "Vuelves a mirar.", outbound, sequence)
+                result(true, messages::looked(locale), outbound, sequence)
                     && self.resend(outbound, sequence).await
             }
             StoryInputCommand::List => {
                 let listing = self
                     .manager
                     .as_ref()
-                    .map(|manager| render_listing(&manager.listing()))
+                    .map(|manager| render_listing(&manager.listing(), locale))
                     .unwrap_or_default();
                 result(true, &listing, outbound, sequence)
             }
             StoryInputCommand::Seats => match self.frame() {
                 Some(frame) => {
                     let lobby = frame.lobby(self.account);
-                    result(true, &render_lobby(&lobby), outbound, sequence)
+                    result(true, &render_lobby(&lobby, locale), outbound, sequence)
                         && queue_lobby(outbound, sequence, lobby)
                 }
-                None => result(false, StoryFailure::NotShared.message(), outbound, sequence),
+                None => result(
+                    false,
+                    StoryFailure::NotShared.message_in(locale),
+                    outbound,
+                    sequence,
+                ),
             },
             StoryInputCommand::Share => match link.share(&self.name).await {
                 Ok(shared) => {
                     let lobby = shared
                         .frames()
-                        .map(|frames| render_lobby(&frames.borrow().lobby(self.account)))
+                        .map(|frames| render_lobby(&frames.borrow().lobby(self.account), locale))
                         .unwrap_or_default();
                     let last = self.sent_view_rev;
                     self.set_link(shared);
@@ -739,24 +755,14 @@ impl WebStorySession {
                 }
             },
             StoryInputCommand::Invite(name) => match link.invite(&name).await {
-                Ok(()) => result(
-                    true,
-                    &format!("Invitación enviada a {name}, si está conectado."),
-                    outbound,
-                    sequence,
-                ),
+                Ok(()) => result(true, &messages::invited(locale, &name), outbound, sequence),
                 Err(failure) => {
                     self.text_failure(outbound, sequence, request_id, failure)
                         .await
                 }
             },
             StoryInputCommand::Kick(name) => match link.kick(&name).await {
-                Ok(()) => result(
-                    true,
-                    &format!("{name} ya no participa en la historia."),
-                    outbound,
-                    sequence,
-                ),
+                Ok(()) => result(true, &messages::kicked(locale, &name), outbound, sequence),
                 Err(failure) => {
                     self.text_failure(outbound, sequence, request_id, failure)
                         .await
@@ -764,15 +770,7 @@ impl WebStorySession {
             },
             StoryInputCommand::Mode(Some((mode, seconds))) => {
                 match link.set_mode(mode, seconds).await {
-                    Ok(()) => result(
-                        true,
-                        &format!(
-                            "Modo de decisión: {}.",
-                            crate::story_sessions::mode_label(mode)
-                        ),
-                        outbound,
-                        sequence,
-                    ),
+                    Ok(()) => result(true, &messages::mode_set(locale, mode), outbound, sequence),
                     Err(failure) => {
                         self.text_failure(outbound, sequence, request_id, failure)
                             .await
@@ -781,7 +779,7 @@ impl WebStorySession {
             }
             StoryInputCommand::Mode(None) => result(
                 false,
-                StoryFailure::InvalidSetting.message(),
+                StoryFailure::InvalidSetting.message_in(locale),
                 outbound,
                 sequence,
             ),
@@ -789,7 +787,7 @@ impl WebStorySession {
                 Ok(saved) => {
                     result(
                         true,
-                        &format!("Partida guardada en la ranura {}.", saved.slot),
+                        &messages::saved(locale, saved.slot),
                         outbound,
                         sequence,
                     ) && queue_saved(outbound, sequence, saved)
@@ -808,7 +806,7 @@ impl WebStorySession {
             }
             StoryInputCommand::Slots => match link.slots().await {
                 Ok(slots) => {
-                    result(true, &render_slots(&slots), outbound, sequence)
+                    result(true, &render_slots(&slots, locale), outbound, sequence)
                         && queue_slots(outbound, sequence, slots, false)
                 }
                 Err(failure) => {
@@ -820,12 +818,8 @@ impl WebStorySession {
                 let slot = slot.unwrap_or(u8::MAX);
                 match link.delete_slot(slot).await {
                     Ok(slots) => {
-                        result(
-                            true,
-                            &format!("Partida de la ranura {slot} borrada."),
-                            outbound,
-                            sequence,
-                        ) && queue_slots(outbound, sequence, slots, false)
+                        result(true, &messages::deleted(locale, slot), outbound, sequence)
+                            && queue_slots(outbound, sequence, slots, false)
                     }
                     Err(failure) => {
                         self.text_failure(outbound, sequence, request_id, failure)
@@ -835,9 +829,9 @@ impl WebStorySession {
             }
             StoryInputCommand::Other => {
                 let help = if link.is_shared() {
-                    SHARED_STORY_HELP
+                    messages::shared_help(locale)
                 } else {
-                    STORY_INPUT_HELP
+                    messages::input_help(locale)
                 };
                 result(false, help, outbound, sequence)
             }
@@ -862,11 +856,7 @@ impl WebStorySession {
         };
         match link.restore(slot).await {
             Ok(view) => {
-                let message = if slot == 0 {
-                    "Continúas la partida autoguardada.".to_owned()
-                } else {
-                    format!("Cargas la partida de la ranura {slot}.")
-                };
+                let message = messages::restored(link.locale(), slot);
                 queue_action_result(outbound, sequence, request_id, true, Some(message))
                     && queue_restored(outbound, sequence, slot)
                     && self.publish_reply(outbound, sequence, view)
@@ -953,6 +943,20 @@ fn queue_entered(outbound: &OutboundHandle, sequence: &mut u64, link: &StoryLink
             locales: link.locales().to_vec(),
         },
     )
+}
+
+/// Every part of the catalog listing (see [`catalog_parts`]).
+fn queue_catalog(outbound: &OutboundHandle, sequence: &mut u64, manager: &StoryManager) -> bool {
+    catalog_parts(&manager.listing()).into_iter().all(|part| {
+        queue_sequenced(
+            outbound,
+            sequence,
+            OutboundPriority::Critical,
+            None,
+            ServerMessageType::StoryCatalog,
+            part,
+        )
+    })
 }
 
 fn queue_lobby(outbound: &OutboundHandle, sequence: &mut u64, lobby: protocol::StoryLobby) -> bool {

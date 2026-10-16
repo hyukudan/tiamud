@@ -5,6 +5,7 @@ import {
   createCommandSubmit,
   createHeartbeatAck,
   createPromotionPerform,
+  createStoryCatalog,
   createStoryChoose,
   createStoryContinue,
   createStoryDeleteSlot,
@@ -408,6 +409,12 @@ export class TiamudConnection {
   storyContinue(): boolean {
     if (this.#socket?.readyState !== WebSocket.OPEN) return false;
     this.#socket.send(JSON.stringify(createStoryContinue()));
+    return true;
+  }
+
+  storyCatalog(): boolean {
+    if (this.#socket?.readyState !== WebSocket.OPEN) return false;
+    this.#socket.send(JSON.stringify(createStoryCatalog()));
     return true;
   }
 

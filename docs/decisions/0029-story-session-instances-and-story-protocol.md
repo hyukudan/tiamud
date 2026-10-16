@@ -221,3 +221,23 @@ sobre el locale fijo:
   [ADR 0031](0031-parser-interactive-fiction-storypack-v3.md)).
 
 Ver el [registro](../project/log/2026-10-15-story-presentation-locale-compat.md).
+
+## Nota de estado (2026-10-16): catálogo con idiomas, selector web y texto localizado
+
+Añadida después de la decisión; no la cambia. Matiza lo dicho arriba sobre
+el listado y sobre los mensajes del servidor en castellano:
+
+- Mensaje aditivo `story.catalog {part, parts, stories: [{storyId, title,
+  locales}]}` (≤64 historias, 1–16 locales con el predeterminado primero,
+  partes ≤15 KiB) que responde al cliente `story.catalog {}` y sigue al texto
+  de `historias`/`stories`; el listado de texto de Web y Telnet muestra los
+  idiomas de cada historia.
+- El navegador ofrece un selector (botón *Stories*) que preselecciona el
+  idioma del navegador si el pack lo ofrece, si no `es`, y entra con el mismo
+  comando `historia <id> <locale>`; entrar sigue usando `command.submit`.
+- El texto propio del servidor dentro de una sesión (errores, ayuda,
+  confirmaciones, etiquetas Telnet, listados y líneas de evento) sigue el
+  locale de la sesión: inglés para `en`/`en-*`, castellano en otro caso y
+  fuera de una historia.
+
+Ver el [registro](../project/log/2026-10-16-story-language-picker-and-dialogue-portraits.md).

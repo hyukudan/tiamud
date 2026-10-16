@@ -562,11 +562,13 @@ fn story_payloads_have_their_documented_shape() {
                 StoryItem::Block {
                     kind: StoryBlockKind::Event,
                     speaker: None,
+                    portrait: None,
                     text: "Tirada 2d6".into(),
                 },
                 StoryItem::Block {
                     kind: StoryBlockKind::Line,
                     speaker: Some("Lola".into()),
+                    portrait: None,
                     text: "Hola.".into(),
                 },
                 StoryItem::Stat {
@@ -881,6 +883,55 @@ fn shared_story_payloads_have_their_documented_shape() {
 }
 
 #[test]
+fn story_catalog_and_line_portraits_have_their_documented_shape() {
+    assert_wire(
+        StoryCatalog {
+            part: 0,
+            parts: 1,
+            stories: vec![
+                StoryCatalogEntry {
+                    story_id: "cripta-del-nigromante".into(),
+                    title: "La cripta del nigromante".into(),
+                    locales: vec!["es".into()],
+                },
+                StoryCatalogEntry {
+                    story_id: "lluvia-de-neon".into(),
+                    title: "Lluvia de neón".into(),
+                    locales: vec!["es".into(), "en".into()],
+                },
+            ],
+        },
+        json!({"part": 0, "parts": 1, "stories": [
+            {"storyId": "cripta-del-nigromante", "title": "La cripta del nigromante",
+             "locales": ["es"]},
+            {"storyId": "lluvia-de-neon", "title": "Lluvia de neón", "locales": ["es", "en"]}
+        ]}),
+    );
+    assert_wire(
+        StoryItem::Block {
+            kind: StoryBlockKind::Line,
+            speaker: Some("Lola".into()),
+            portrait: Some(StoryImage {
+                manifest: format!("/assets/{}/manifest.json", "c".repeat(64)),
+                alt: "Portrait silhouette of Lola.".into(),
+            }),
+            text: "Hi.".into(),
+        },
+        json!({"type": "block", "kind": "line", "speaker": "Lola",
+               "portrait": {"manifest": format!("/assets/{}/manifest.json", "c".repeat(64)),
+                            "alt": "Portrait silhouette of Lola."},
+               "text": "Hi."}),
+    );
+    assert_eq!(
+        serde_json::to_value(ServerMessageType::StoryCatalog).unwrap(),
+        json!("story.catalog")
+    );
+    assert_eq!(ServerMessageType::StoryCatalog.as_str(), "story.catalog");
+    assert!(serde_json::from_value::<ClientMessageType>(json!("story.catalog")).is_ok());
+    assert_eq!(MAX_STORY_LOCALES, 16);
+}
+
+#[test]
 fn parser_story_payloads_have_their_documented_shape() {
     assert_wire(
         StoryView {
@@ -904,11 +955,13 @@ fn parser_story_payloads_have_their_documented_shape() {
                 StoryItem::Block {
                     kind: StoryBlockKind::Command,
                     speaker: None,
+                    portrait: None,
                     text: "enciende la lampara".into(),
                 },
                 StoryItem::Block {
                     kind: StoryBlockKind::Reply,
                     speaker: None,
+                    portrait: None,
                     text: "¿Cuál quieres decir?".into(),
                 },
             ],

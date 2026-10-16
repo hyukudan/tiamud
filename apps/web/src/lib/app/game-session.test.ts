@@ -54,6 +54,7 @@ function harness() {
     storyKick: vi.fn(() => true),
     storyMode: vi.fn(() => true),
     storyCommand: vi.fn(() => true),
+    storyCatalog: vi.fn(() => true),
   } satisfies SessionConnection;
   const storage = new Map<string, string>();
   const historyView: HistoryView = {
@@ -288,6 +289,49 @@ describe('GameSession', () => {
     expect(session.story).toBeDefined();
     callbacks().onMessage(message('server.welcome', { serverName: 'Tiamud', motd: 'Hi' }, 1));
     expect(session.story).toBeUndefined();
+  });
+
+  it('opens the story picker from the catalog and enters in the chosen language', () => {
+    const { session, connection, callbacks } = harness();
+    session.openStoryCatalog();
+    expect(connection.storyCatalog).toHaveBeenCalledOnce();
+    expect(session.storyCatalogPending).toBe(true);
+    // A second request waits for the first answer.
+    session.openStoryCatalog();
+    expect(connection.storyCatalog).toHaveBeenCalledOnce();
+    const lluvia = { storyId: 'lluvia-de-neon', title: 'Lluvia de neón', locales: ['es', 'en'] };
+    callbacks().onMessage(message('story.catalog', {
+      part: 0, parts: 2, stories: [{ storyId: 'cripta', title: 'Cripta', locales: ['es'] }],
+    }, 2));
+    expect(session.storyCatalog).toBeUndefined();
+    callbacks().onMessage(message('story.catalog', { part: 1, parts: 2, stories: [lluvia] }, 3));
+    expect(session.storyCatalogPending).toBe(false);
+    expect(session.storyCatalog?.map((story) => story.storyId)).toEqual(['cripta', 'lluvia-de-neon']);
+
+    // Only an offered language is sent, through the shared text command.
+    session.enterStory('lluvia-de-neon', 'fr');
+    session.enterStory('desconocida', 'es');
+    expect(connection.submit).not.toHaveBeenCalled();
+    session.enterStory('lluvia-de-neon', 'en');
+    expect(connection.submit).toHaveBeenCalledWith('historia lluvia-de-neon en', expect.any(String));
+    callbacks().onMessage(message('story.entered', {
+      storyId: 'lluvia-de-neon', title: 'Neon Rain', locale: 'en', locales: ['es', 'en'],
+    }, 4));
+    expect(session.storyCatalog).toBeUndefined();
+    expect(session.storyLocale).toBe('en');
+
+    // Outside a story a story error becomes a notice (nothing else shows it).
+    const other = harness();
+    other.session.openStoryCatalog();
+    other.callbacks().onMessage(message('story.error', {
+      code: 'disabled', message: 'Las historias no están disponibles en este servidor.',
+    }, 2));
+    expect(other.session.storyCatalogPending).toBe(false);
+    expect(other.session.notice).toEqual({
+      level: 'error', message: 'Las historias no están disponibles en este servidor.',
+    });
+    other.session.closeStoryCatalog();
+    expect(other.session.storyCatalog).toBeUndefined();
   });
 
   it('sends parser commands only while the view shows a prompt', () => {

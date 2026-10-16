@@ -10,7 +10,7 @@ use crate::{
         MailMessage, MailPage, StoreError,
     },
     social::{MAX_CHAT_MESSAGE_BYTES, MAX_SOCIAL_TARGET_BYTES},
-    story_sessions::{STORY_INPUT_HELP, parse_story_command},
+    story_sessions::{messages as story_messages, parse_story_command},
     world_actor::{
         CharacterBackgroundSelection, CombatCueKind, GameError, ProjectedViewEvent, WorldHandle,
     },
@@ -639,6 +639,8 @@ enum ClientMessage {
         slot: u8,
     },
     StorySlots,
+    /// `story.catalog {}`: the stories and their languages.
+    StoryCatalog,
     StoryDeleteSlot {
         slot: u8,
     },
@@ -1257,6 +1259,7 @@ async fn websocket_session(mut socket: WebSocket, state: AppState, peer_address:
                     | ClientMessage::StorySave { .. }
                     | ClientMessage::StoryRestore { .. }
                     | ClientMessage::StorySlots
+                    | ClientMessage::StoryCatalog
                     | ClientMessage::StoryDeleteSlot { .. }
                     | ClientMessage::StoryVote { .. }
                     | ClientMessage::StoryShare
@@ -1289,6 +1292,7 @@ async fn websocket_session(mut socket: WebSocket, state: AppState, peer_address:
                                 story.restore(&outbound, &mut sequence, slot).await
                             }
                             ClientMessage::StorySlots => story.slots(&outbound, &mut sequence).await,
+                            ClientMessage::StoryCatalog => story.catalog(&outbound, &mut sequence),
                             ClientMessage::StoryDeleteSlot { slot } => {
                                 story.delete_slot(&outbound, &mut sequence, slot).await
                             }
@@ -1357,7 +1361,7 @@ async fn websocket_session(mut socket: WebSocket, state: AppState, peer_address:
                                 &mut sequence,
                                 &requested.request_id,
                                 false,
-                                Some(STORY_INPUT_HELP.to_owned()),
+                                Some(story_messages::input_help(story.locale()).to_owned()),
                             ),
                         };
                         if !delivered
@@ -3135,12 +3139,13 @@ fn parse_client_message(text: &str) -> Result<ClientMessage, ClientMessageError>
                 _ => ClientMessage::StoryDeleteSlot { slot: data.slot },
             })
         }
-        "story.slots" | "story.continue" | "story.share" => {
+        "story.slots" | "story.continue" | "story.share" | "story.catalog" => {
             if !envelope.data.as_object().is_some_and(Map::is_empty) {
                 return Err(ClientMessageError::InvalidEnvelope);
             }
             Ok(match envelope.message_type.as_str() {
                 "story.slots" => ClientMessage::StorySlots,
+                "story.catalog" => ClientMessage::StoryCatalog,
                 "story.share" => ClientMessage::StoryShare,
                 _ => ClientMessage::StoryRestore { slot: 0 },
             })

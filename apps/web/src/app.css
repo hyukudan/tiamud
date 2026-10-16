@@ -1716,6 +1716,13 @@ kbd {
   .session-controls .character-name {
     display: none;
   }
+
+  /* The Stories button joins the controls; wrap instead of overflowing. */
+  .session-controls {
+    flex-wrap: wrap;
+    row-gap: 0.25rem;
+    min-width: 0;
+  }
 }
 
 /*

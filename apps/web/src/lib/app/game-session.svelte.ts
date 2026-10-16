@@ -27,9 +27,11 @@ import type {
 } from '../protocol';
 import {
   MAX_STORY_COMMAND_BYTES,
+  StoryCatalogAssembler,
   StoryViewAssembler,
   type AssembledStoryView,
 } from '../story-protocol';
+import type { StoryCatalogEntry } from '../generated/protocol';
 import { isLootRollProjection } from '../dashboard/loot';
 import {
   clearStoredAccess,
@@ -97,7 +99,7 @@ export type SessionConnection = Pick<
   'storyChoose' | 'storyDialogue' | 'storyMenu' | 'storyUndo' | 'storyLeave' |
   'storySave' | 'storyRestore' | 'storyDeleteSlot' | 'storySlots' | 'storyContinue' |
   'storyVote' | 'storyShare' | 'storyJoin' | 'storyInvite' | 'storyKick' | 'storyMode' |
-  'storyCommand'
+  'storyCommand' | 'storyCatalog'
 >>;
 
 export interface AudioSink {
@@ -173,6 +175,13 @@ export class GameSession {
   storyLocale = $state('es');
   /** Languages the current story offers, default first. */
   storyLocales = $state<string[]>(['es']);
+  /**
+   * Stories this server offers with their languages (`story.catalog`), while
+   * the story picker is open; `undefined` when it is closed.
+   */
+  storyCatalog = $state<StoryCatalogEntry[]>();
+  /** True between asking for the catalog and receiving it. */
+  storyCatalogPending = $state(false);
 
   /** Scene entities that can carry an optional sprite. */
   readonly visualEntities = $derived.by((): VisualSceneEntity[] =>
@@ -187,6 +196,7 @@ export class GameSession {
   readonly #pendingStructuredActions = new Map<string, PendingStructuredAction>();
   readonly #seenMessageCueKeys: string[] = [];
   readonly #storyParts = new StoryViewAssembler();
+  readonly #catalogParts = new StoryCatalogAssembler();
   readonly #deps: GameSessionDeps;
 
   constructor(deps: GameSessionDeps) {
@@ -221,6 +231,7 @@ export class GameSession {
         return;
       case 'story.entered':
         this.#storyParts.reset();
+        this.closeStoryCatalog();
         this.storyLocale = message.data.locale;
         this.storyLocales = message.data.locales;
         this.storyError = undefined;
@@ -284,7 +295,20 @@ export class GameSession {
       case 'story.error':
         this.storyPending = false;
         this.storyError = message.data;
+        // Outside a story there is no story panel: show it as a notice.
+        if (!this.story) {
+          this.storyCatalogPending = false;
+          this.notice = { level: 'error', message: message.data.message };
+        }
         return;
+      case 'story.catalog': {
+        const stories = this.#catalogParts.push(message.data);
+        if (stories) {
+          this.storyCatalogPending = false;
+          if (!this.story) this.storyCatalog = stories;
+        }
+        return;
+      }
       case 'story.left':
         this.#clearStory();
         this.#replaceHistory([
@@ -374,6 +398,8 @@ export class GameSession {
     if (state === 'disconnected') {
       this.storyPending = false;
       this.#storyParts.reset();
+      this.storyCatalogPending = false;
+      this.#catalogParts.reset();
       this.#markPendingInterrupted();
       this.#cancelVisualCues();
       this.#apply(clearedPanels());
@@ -534,6 +560,30 @@ export class GameSession {
 
   dismissStoryInvitation = (): void => {
     this.storyInvitation = undefined;
+  };
+
+  /** Asks the server for its stories and their languages (the picker). */
+  openStoryCatalog = (): void => {
+    if (this.story || this.storyCatalogPending) return;
+    this.#catalogParts.reset();
+    if (this.#connection?.storyCatalog?.()) this.storyCatalogPending = true;
+  };
+
+  closeStoryCatalog = (): void => {
+    this.storyCatalog = undefined;
+    this.storyCatalogPending = false;
+    this.#catalogParts.reset();
+  };
+
+  /**
+   * Enters `storyId` in `locale` with the same text command a player types
+   * (`historia <id> <locale>`), so browser and Telnet stay equivalent.
+   */
+  enterStory = (storyId: string, locale: string): void => {
+    if (this.story) return;
+    const entry = this.storyCatalog?.find((story) => story.storyId === storyId);
+    if (!entry || !entry.locales.includes(locale)) return;
+    this.submitCommand(`historia ${storyId} ${locale}`);
   };
 
   /** Host: sends the join code to a connected character. */

@@ -256,9 +256,22 @@
     {/if}
     {#each story.paragraphs as paragraph, index (index)}<p>{paragraph}</p>{/each}
     {#each story.lines as line, index (index)}
-      <p class="story-line">
-        {#if line.speaker}<strong>{line.speaker}:</strong> {/if}{line.text}
-      </p>
+      {#if images && line.portrait}
+        <!-- The speaker's expression portrait beside the line; the speaker
+             name stays the text equivalent, so a missing image shows nothing. -->
+        <div class="story-line-row">
+          {#key line.portrait.manifest}
+            <StoryImage image={line.portrait} kind="line" {lang} />
+          {/key}
+          <p class="story-line">
+            {#if line.speaker}<strong>{line.speaker}:</strong> {/if}{line.text}
+          </p>
+        </div>
+      {:else}
+        <p class="story-line">
+          {#if line.speaker}<strong>{line.speaker}:</strong> {/if}{line.text}
+        </p>
+      {/if}
     {/each}
     {#if story.ending}
       <p class="story-ending" role="status"><strong>{endingLabel}.</strong> Final score: {story.score}.</p>
@@ -487,6 +500,17 @@
     margin: 0;
     font-size: 0.875rem;
     font-style: italic;
+  }
+
+  .story-line-row {
+    display: flex;
+    gap: 0.75rem;
+    align-items: flex-start;
+    margin: 0 0 0.75rem;
+  }
+
+  .story-text .story-line-row p {
+    margin: 0;
   }
 
   .story-portraits {

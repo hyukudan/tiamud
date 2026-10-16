@@ -3,6 +3,8 @@
 // here before the session applies it.
 import type {
   MediaChannel,
+  StoryCatalog,
+  StoryCatalogEntry,
   StoryDecisionMode,
   StoryEnding,
   StoryEntered,
@@ -43,6 +45,8 @@ const MAX_STORY_IMAGE_ALT = 512;
 const STORY_LOCALE = /^[a-z][a-z0-9-]{1,34}$/;
 /** Maximum languages one story offers. */
 const MAX_STORY_LOCALES = 16;
+/** Maximum stories one server catalog lists. */
+export const MAX_CATALOG_STORIES = 64;
 
 const STORY_ERROR_CODES: readonly StoryErrorCode[] = [
   'disabled', 'unknown_story', 'already_in_story', 'capacity', 'not_in_story',
@@ -177,15 +181,21 @@ export const parseStoryItem = (value: unknown): StoryItem | undefined => {
       return image ? { type: 'portrait', name, image } : { type: 'portrait', name };
     }
     case 'block': {
-      if (!exactKeys(value, ['type', 'kind', 'text'], ['speaker'])) return undefined;
+      if (!exactKeys(value, ['type', 'kind', 'text'], ['speaker', 'portrait'])) return undefined;
       const body = text(value.text, MAX_STORY_TEXT);
       const speaker = value.speaker === undefined ? undefined : text(value.speaker, MAX_STORY_LABEL);
+      const portrait = value.portrait === undefined ? undefined : parseStoryImage(value.portrait);
       if (!body || (value.speaker !== undefined && !speaker) ||
         (value.kind !== 'event' && value.kind !== 'line' && value.kind !== 'command' &&
           value.kind !== 'reply')) return undefined;
-      return speaker
-        ? { type: 'block', kind: value.kind, speaker, text: body }
-        : { type: 'block', kind: value.kind, text: body };
+      // Only a spoken dialogue line may carry its speaker's portrait.
+      if (value.portrait !== undefined && (!portrait || value.kind !== 'line' || !speaker)) {
+        return undefined;
+      }
+      const block: StoryItem = { type: 'block', kind: value.kind, text: body };
+      if (speaker) block.speaker = speaker;
+      if (portrait) block.portrait = portrait;
+      return block;
     }
     case 'stat': {
       const label = text(value.label, MAX_STORY_LABEL);
@@ -250,14 +260,92 @@ export function parseStoryEntered(data: Record<string, unknown>): StoryEntered |
   if (!exactKeys(data, ['storyId', 'title'], ['locale', 'locales'])) return undefined;
   const title = text(data.title, MAX_STORY_LABEL);
   const locale = data.locale === undefined ? 'es' : data.locale;
-  const locales = data.locales === undefined ? [locale] : data.locales;
-  if (typeof locale !== 'string' || !STORY_LOCALE.test(locale) || !Array.isArray(locales) ||
-    locales.length === 0 || locales.length > MAX_STORY_LOCALES ||
-    !locales.every((entry) => typeof entry === 'string' && STORY_LOCALE.test(entry)) ||
-    new Set(locales).size !== locales.length || !locales.includes(locale)) return undefined;
+  const locales = parseLocales(data.locales === undefined ? [locale] : data.locales);
+  if (typeof locale !== 'string' || !STORY_LOCALE.test(locale) || !locales ||
+    !locales.includes(locale)) return undefined;
   return typeof data.storyId === 'string' && STORY_ID.test(data.storyId) && title
-    ? { storyId: data.storyId, title, locale, locales: locales as string[] }
+    ? { storyId: data.storyId, title, locale, locales }
     : undefined;
+}
+
+/** One to sixteen distinct, well-formed locale tags, in server order. */
+function parseLocales(value: unknown): string[] | undefined {
+  if (!Array.isArray(value) || value.length === 0 || value.length > MAX_STORY_LOCALES ||
+    !value.every((entry) => typeof entry === 'string' && STORY_LOCALE.test(entry)) ||
+    new Set(value).size !== value.length) return undefined;
+  return value as string[];
+}
+
+const parseCatalogEntry = (value: unknown): StoryCatalogEntry | undefined => {
+  if (!isRecord(value) || !exactKeys(value, ['storyId', 'title', 'locales'])) return undefined;
+  const title = text(value.title, MAX_STORY_LABEL);
+  const locales = parseLocales(value.locales);
+  return typeof value.storyId === 'string' && STORY_ID.test(value.storyId) && title && locales
+    ? { storyId: value.storyId, title, locales }
+    : undefined;
+};
+
+/** `story.catalog`: one part of the server's story list (ids, titles, languages). */
+export function parseStoryCatalog(data: Record<string, unknown>): StoryCatalog | undefined {
+  if (!exactKeys(data, ['part', 'parts', 'stories'])) return undefined;
+  const parts = u32(data.parts, 1);
+  const part = u32(data.part);
+  const stories = boundedArray(data.stories, MAX_CATALOG_STORIES, parseCatalogEntry);
+  return parts !== undefined && parts <= MAX_STORY_PARTS && part !== undefined && part < parts &&
+    stories
+    ? { part, parts, stories }
+    : undefined;
+}
+
+/**
+ * Collects the parts of one catalog listing. A part out of order restarts
+ * the buffer; the assembled list must have unique ids and at most 64 stories.
+ */
+export class StoryCatalogAssembler {
+  #parts: StoryCatalog[] = [];
+
+  push(part: StoryCatalog): StoryCatalogEntry[] | undefined {
+    const first = this.#parts[0];
+    if (part.part === 0 || !first || first.parts !== part.parts ||
+      part.part !== this.#parts.length) {
+      this.#parts = [];
+      if (part.part !== 0) return undefined;
+    }
+    this.#parts.push(part);
+    if (this.#parts.length < part.parts) return undefined;
+    const stories = this.#parts.flatMap((next) => next.stories);
+    this.#parts = [];
+    const ids = new Set(stories.map((story) => story.storyId));
+    return ids.size === stories.length && stories.length <= MAX_CATALOG_STORIES
+      ? stories
+      : undefined;
+  }
+
+  reset(): void {
+    this.#parts = [];
+  }
+}
+
+/**
+ * The language a story picker preselects: the reader's first preferred
+ * language the story offers (exact tag, then primary language), else
+ * Spanish when offered, else the story's default (its first locale).
+ */
+export function preferredStoryLocale(
+  locales: readonly string[],
+  preferred: readonly unknown[] = [],
+): string {
+  const offered = locales.map((locale) => locale.toLowerCase());
+  for (const candidate of preferred.slice(0, MAX_STORY_LOCALES)) {
+    if (typeof candidate !== 'string' || candidate.length > 35) continue;
+    const tag = candidate.trim().toLowerCase();
+    const exact = offered.indexOf(tag);
+    if (exact >= 0) return locales[exact];
+    const primary = offered.indexOf(tag.split('-', 1)[0]);
+    if (primary >= 0) return locales[primary];
+  }
+  const spanish = offered.indexOf('es');
+  return spanish >= 0 ? locales[spanish] : (locales[0] ?? 'es');
 }
 
 export function parseStoryLeft(data: Record<string, unknown>): StoryLeft | undefined {
@@ -489,7 +577,8 @@ export interface StoryPresentation {
   score: number;
   ending?: 'victory' | 'defeat' | 'neutral';
   events: string[];
-  lines: { speaker?: string; text: string }[];
+  /** Menu responses and dialogue lines; `portrait` is the speaker's reviewed image. */
+  lines: { speaker?: string; text: string; portrait?: StoryImage }[];
   present: string[];
   /** Characters present with their reviewed portrait, when one was sent. */
   portraits: { name: string; image?: StoryImage }[];
@@ -527,7 +616,12 @@ export function presentStory(view: AssembledStoryView): StoryPresentation {
         if (item.kind === 'event') model.events.push(item.text);
         else if (item.kind === 'command') model.command = item.text;
         else if (item.kind === 'reply') model.replies.push(item.text);
-        else model.lines.push(item.speaker ? { speaker: item.speaker, text: item.text } : { text: item.text });
+        else {
+          const line: StoryPresentation['lines'][number] = { text: item.text };
+          if (item.speaker) line.speaker = item.speaker;
+          if (item.portrait) line.portrait = item.portrait;
+          model.lines.push(line);
+        }
         break;
       case 'portrait':
         model.present.push(item.name);

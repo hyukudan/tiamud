@@ -131,9 +131,12 @@ than 1,024 directory entries stops the server.
   cues never play and unmapped images are never shown. The reviewed fixtures
   directory `crates/story-core/fixtures` ships such a map for the
   `lluvia-de-neon` sample art in `apps/web/public/assets/`.
-- Players choose a story language on entry (`historia <id> en`) among the
-  pack's lexicons (parser stories) or title locales; Spanish is the default
-  when offered. No setting is needed.
+- Players choose a story language on entry (`historia <id> en`, or the
+  browser's **Stories** picker, which preselects the browser language when
+  the pack offers it) among the pack's lexicons (parser stories) or title
+  locales; Spanish is the default when offered. The server's own story text
+  follows the session language (English for `en`, Spanish otherwise). No
+  setting is needed.
 
 Story metrics carry no story, node or account labels:
 `tiamud_story_catalog_stories`, `tiamud_story_instances`,

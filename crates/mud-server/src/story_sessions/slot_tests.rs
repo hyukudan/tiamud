@@ -577,21 +577,42 @@ fn slot_listing_renders_dates_and_incompatible_slots() {
             compatible: false,
         },
     ];
-    let text = render_slots(&slots);
+    let text = render_slots(&slots, "es");
     assert!(text.contains("0 (autoguardado) — 1970-01-01 00:00 UTC"));
     assert!(text.contains("2 — 1970-01-01 00:01 UTC (otra versión"));
-    let offer = render_continue_offer(&protocol::StorySlots {
-        slots: slots.to_vec(),
-        offer_continue: true,
-    })
+    let offer = render_continue_offer(
+        &protocol::StorySlots {
+            slots: slots.to_vec(),
+            offer_continue: true,
+        },
+        "es",
+    )
     .unwrap();
     assert!(offer.contains("continuar"));
     assert!(
-        render_continue_offer(&protocol::StorySlots {
-            slots: slots.to_vec(),
-            offer_continue: false,
-        })
+        render_continue_offer(
+            &protocol::StorySlots {
+                slots: slots.to_vec(),
+                offer_continue: false,
+            },
+            "es",
+        )
         .is_none()
     );
-    assert!(render_slots(&[]).contains("guardar N"));
+    assert!(render_slots(&[], "es").contains("guardar N"));
+    // An English session reads the same listing in English.
+    let english = render_slots(&slots, "en");
+    assert!(english.starts_with("Saved games:"));
+    assert!(english.contains("0 (autosave) — 1970-01-01 00:00 UTC"));
+    assert!(english.contains("(another version of the story; cannot be loaded)"));
+    assert!(render_slots(&[], "en-GB").contains("save N"));
+    let offer = render_continue_offer(
+        &protocol::StorySlots {
+            slots: slots.to_vec(),
+            offer_continue: true,
+        },
+        "en",
+    )
+    .unwrap();
+    assert!(offer.starts_with("You have an autosaved game (1970-01-01 00:00 UTC)."));
 }
