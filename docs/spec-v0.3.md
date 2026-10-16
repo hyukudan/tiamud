@@ -63,8 +63,9 @@ sections with their revision and SHA-256. Commits rewrite only the sections
 that the durable baseline cannot prove unchanged; recovery reassembles the
 same snapshot DTO, applies the 1/2 MiB ceiling to the assembled document and
 fails closed on any mismatch. The mover verifies and copies the rows byte for
-byte. Its PostgreSQL tests are written but have not run, so no PostgreSQL
-evidence is v17.
+byte. Its PostgreSQL tests passed locally on a disposable PostgreSQL 18.6
+cluster on 2026-10-16 (local evidence, not CI; the integral PostgreSQL smoke
+is still v14).
 
 Operations are in [single-host.md](operations/single-host.md). Microservices and
 orchestration are not a goal without measured load that justifies them.

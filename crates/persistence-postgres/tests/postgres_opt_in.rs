@@ -283,8 +283,30 @@ fn migrates_a_representative_current_database_when_postgres_is_available() {
             .is_err(),
         "the PostgreSQL state byte bound must match SQLite"
     );
-    // A genuine v15 database has no story_saves table; v15 -> v16 adds it
-    // empty without touching any other authority.
+    assert_eq!(
+        postgres
+            .query_one(
+                "SELECT last_event_sequence FROM world_runtime WHERE singleton = 1",
+                &[],
+            )
+            .unwrap()
+            .get::<_, Option<i64>>(0),
+        Some(7)
+    );
+    let mut target_runtime =
+        tiamud_persistence_postgres::runtime_sections::load_stored_runtime(&mut postgres, false)
+            .unwrap()
+            .unwrap();
+    target_runtime.sections.sort_by(|a, b| a.name.cmp(&b.name));
+    assert_eq!(
+        target_runtime, source_runtime,
+        "offline transfer must preserve the verified runtime rows byte-for-byte"
+    );
+    assert_eq!(assembled_runtime(&mut postgres), json_value(&runtime_json));
+    // A genuine v15 database has no story_saves table and still keeps the
+    // single-document runtime; v15 -> v16 adds story_saves empty and v16 ->
+    // v17 sections the runtime, without touching any other authority.
+    downgrade_runtime_to_v16(&mut postgres, &runtime_json, Some(7));
     postgres
         .batch_execute(
             "DROP TABLE story_saves;
@@ -293,7 +315,12 @@ fn migrates_a_representative_current_database_when_postgres_is_available() {
         .unwrap();
     assert_eq!(
         tiamud_persistence_postgres::migrate(&mut postgres).unwrap(),
-        tiamud_persistence_postgres::MigrationReport { from: 15, to: 16 }
+        tiamud_persistence_postgres::MigrationReport { from: 15, to: 17 }
+    );
+    assert_eq!(
+        assembled_runtime(&mut postgres),
+        json_value(&runtime_json),
+        "v15 to v17 must preserve the runtime payload"
     );
     assert_eq!(
         postgres
@@ -308,7 +335,7 @@ fn migrates_a_representative_current_database_when_postgres_is_available() {
             .unwrap()
             .get::<_, i64>(0),
         1,
-        "v15 to v16 must not touch area checkpoints"
+        "v15 to v17 must not touch area checkpoints"
     );
     assert_eq!(
         postgres
@@ -414,26 +441,6 @@ fn migrates_a_representative_current_database_when_postgres_is_available() {
             .is_err(),
         "staff audit must reject mutation"
     );
-    assert_eq!(
-        postgres
-            .query_one(
-                "SELECT last_event_sequence FROM world_runtime WHERE singleton = 1",
-                &[],
-            )
-            .unwrap()
-            .get::<_, Option<i64>>(0),
-        Some(7)
-    );
-    let mut target_runtime =
-        tiamud_persistence_postgres::runtime_sections::load_stored_runtime(&mut postgres, false)
-            .unwrap()
-            .unwrap();
-    target_runtime.sections.sort_by(|a, b| a.name.cmp(&b.name));
-    assert_eq!(
-        target_runtime, source_runtime,
-        "offline transfer must preserve the verified runtime rows byte-for-byte"
-    );
-    assert_eq!(assembled_runtime(&mut postgres), json_value(&runtime_json));
 
     // v16 -> v17 splits the single legacy document into verified sections.
     downgrade_runtime_to_v16(&mut postgres, &runtime_json, Some(7));
