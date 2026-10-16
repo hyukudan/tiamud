@@ -443,6 +443,16 @@ impl RuntimeMetrics {
         }
     }
 
+    /// Cumulative (transactions, microseconds) of measured database
+    /// transactions; the hot-path measurement samples it around each action.
+    #[cfg(test)]
+    pub(crate) fn database_transaction_totals(&self) -> (u64, u64) {
+        (
+            self.database_transactions_total.load(Ordering::Relaxed),
+            self.database_latency_microseconds.load(Ordering::Relaxed),
+        )
+    }
+
     pub fn set_database_queue_depth(&self, depth: usize) {
         self.database_queue_depth.store(depth, Ordering::Relaxed);
     }
