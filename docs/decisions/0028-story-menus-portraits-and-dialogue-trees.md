@@ -174,3 +174,15 @@ localizado) y envía `scene.background` y `portrait.image` como
 todo lo jugable. El navegador muestra fondo y retratos solo con multimedia
 permitida y cae al texto alternativo; Telnet imprime el alt del fondo. Ver el
 [registro](../project/log/2026-10-15-story-presentation-locale-compat.md).
+
+## Nota de estado (2026-10-16): retratos en las líneas de diálogo
+
+Añadida después de la decisión; no la cambia. Los bloques con hablante
+(respuestas de menú y líneas de diálogo) ya resolvían en `story-core` el id
+de retrato de la expresión; el servidor lo convierte ahora en imagen con el
+mismo mapa revisado `story-media.json` y envía `block.portrait {manifest,
+alt}` (alt en el locale de la sesión) solo en una línea con `speaker`. Una
+expresión sin entrada en el mapa no produce imagen. El navegador la muestra
+junto a la línea solo con multimedia permitida y Telnet conserva
+`Nombre: «texto»` sin repetir el alt. Ver el
+[registro](../project/log/2026-10-16-story-language-picker-and-dialogue-portraits.md).

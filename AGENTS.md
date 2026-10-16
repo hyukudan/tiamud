@@ -130,8 +130,8 @@ matriz, memoria y documentación pública a la vez.
   `StoryState::from_json_slice` contra el SHA-256 exacto del pack o una
   revisión declarada en `compatible_revisions` de StoryPack v3, que si ya no
   encaja falla con `slot_incompatible`, y no persiste el historial de
-  deshacer). Sus pruebas PostgreSQL no se han ejecutado contra
-  un servidor real.
+  deshacer). Sus pruebas PostgreSQL pasan en local sobre PostgreSQL 18.6
+  desechable (2026-10-16); no es evidencia de CI.
 - El esquema v17 guarda el snapshot de runtime **seccionado**
   ([ADR 0035](docs/decisions/0035-sectioned-runtime-snapshot-storage-schema-v17.md),
   aceptado): `world_runtime` conserva versión, cabecera escalar, manifiesto y
@@ -141,7 +141,10 @@ matriz, memoria y documentación pública a la vez.
   sucio) en la misma transacción; la recuperación ensambla el mismo DTO y
   falla cerrada ante cualquier desacuerdo, con el techo aplicado al documento
   ensamblado. Una escritura nueva de runtime debe pasar por
-  `plan_runtime_write`. Sus pruebas PostgreSQL no se han ejecutado.
+  `plan_runtime_write`. Sus pruebas PostgreSQL pasan en local sobre
+  PostgreSQL 18.6 desechable (2026-10-16; 28/28 del adaptador+mover y 11/11
+  del servidor, [registro](docs/project/log/2026-10-16-postgresql-local-evidence.md));
+  no es evidencia de CI ni humo integral.
 - Cada snapshot registra la secuencia cubierta y conserva atómicamente solo el
   sufijo diagnóstico cubierto de 10.000 secuencias.
 - Autenticación registrada compartida entre web y Telnet. Trabajo Argon2id,

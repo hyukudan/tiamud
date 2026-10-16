@@ -45,6 +45,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+pub mod messages;
 pub mod scripts;
 pub mod shared;
 use scripts::{BudgetHost, ScriptCounters, ScriptPool, ScriptSettings};
@@ -814,13 +815,75 @@ impl StoryCatalog {
         self.stories.get(id)
     }
 
-    /// `(id, title)` in id order.
-    pub fn listing(&self) -> Vec<(String, String)> {
+    /// Every story in id order with its default title and the languages it
+    /// can be played in (default first).
+    pub fn listing(&self) -> Vec<StoryListing> {
         self.stories
             .values()
-            .map(|story| (story.id.clone(), story.title.clone()))
+            .map(|story| StoryListing {
+                id: story.id.clone(),
+                title: story.title.clone(),
+                locales: story.locales.clone(),
+            })
             .collect()
     }
+}
+
+/// One catalog entry as players see it: public id, title in the default
+/// language and every playable language, default first.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StoryListing {
+    pub id: String,
+    pub title: String,
+    pub locales: Vec<String>,
+}
+
+/// Splits the catalog into `story.catalog` payloads whose sequenced
+/// envelopes each stay within the story frame budget. Entries keep their
+/// order and are never split; an empty catalog is one empty part.
+pub fn catalog_parts(listing: &[StoryListing]) -> Vec<protocol::StoryCatalog> {
+    let empty = || protocol::StoryCatalog {
+        part: 0,
+        parts: 1,
+        stories: Vec::new(),
+    };
+    let base = encoded_len(&protocol::ServerEnvelope::new(
+        ServerMessageType::StoryCatalog,
+        u64::MAX,
+        protocol::StoryCatalog {
+            part: u16::MAX,
+            parts: u16::MAX,
+            stories: Vec::new(),
+        },
+    ));
+    let mut parts = vec![empty()];
+    let mut size = base;
+    for story in listing {
+        let entry = protocol::StoryCatalogEntry {
+            story_id: story.id.clone(),
+            title: story.title.clone(),
+            locales: story.locales.clone(),
+        };
+        let cost = encoded_len(&entry) + 1;
+        if size + cost > STORY_VIEW_FRAME_BUDGET
+            && parts.last().is_some_and(|part| !part.stories.is_empty())
+        {
+            parts.push(empty());
+            size = base;
+        }
+        size += cost;
+        parts
+            .last_mut()
+            .expect("parts is never empty")
+            .stories
+            .push(entry);
+    }
+    let total = u16::try_from(parts.len()).unwrap_or(u16::MAX);
+    for (index, part) in parts.iter_mut().enumerate() {
+        part.part = u16::try_from(index).unwrap_or(u16::MAX);
+        part.parts = total;
+    }
+    parts
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -1124,17 +1187,73 @@ impl StoryFailure {
     }
 
     /// [`StoryFailure::message`] in the session's story locale: English
-    /// sessions (`en`, `en-*`) get English text for the failures a player
-    /// of an English story can meet while playing; everything else stays in
-    /// Spanish, the server's language.
+    /// sessions (`en`, `en-*`) get English text; every other locale keeps
+    /// Spanish, the server's default language.
     pub fn message_in(self, locale: &str) -> &'static str {
-        let english = locale == "en" || locale.starts_with("en-");
+        if messages::Lang::of(locale).is_english() {
+            self.english()
+        } else {
+            self.message()
+        }
+    }
+
+    const fn english(self) -> &'static str {
         match self {
-            Self::Script if english => {
+            Self::Disabled => "Stories are not available on this server.",
+            Self::UnknownStory => "There is no such story. Type \"stories\" to see the list.",
+            Self::AlreadyInStory => {
+                "You are already inside another story; type \"leave\" before starting another one."
+            }
+            Self::Capacity => "Too many stories are in progress. Please try again later.",
+            Self::NotInStory => "You are not inside any story.",
+            Self::StaleView => "That option belongs to an earlier view; the current one is shown.",
+            Self::UnknownChoice => "That option is not available.",
+            Self::Ended => "The story has ended. Type \"leave\" to return to the world.",
+            Self::NothingToUndo => "There is nothing left to undo.",
+            Self::Busy => "The story is busy. Please try again.",
+            Self::Gone => {
+                "The story closed after inactivity or from another session. If it was autosaved, you can continue when you enter it again."
+            }
+            Self::Internal => "The story could not continue.",
+            Self::SlotsUnavailable => "Saved games are not available on this server.",
+            Self::InvalidSlot => {
+                "Use a slot from 1 to 9 to save; slot 0 is the autosave (load or delete only)."
+            }
+            Self::SlotEmpty => "That slot is empty.",
+            Self::SlotCorrupt => {
+                "That saved game is damaged and cannot be loaded. You can overwrite it by saving again."
+            }
+            Self::SlotIncompatible => {
+                "That game was saved with another version of the story and can no longer be loaded."
+            }
+            Self::SlotCapacity => {
+                "There is no room left to save this game. Delete a saved game and try again."
+            }
+            Self::RateLimited => "Too many saved game operations. Please wait a moment.",
+            Self::SlotStore => "The saved games could not be reached. Please try again later.",
+            Self::HostOnly => "Only the host of the shared story can do that.",
+            Self::Spectator => "Spectators can only watch.",
+            Self::NotYourTurn => "It is not your turn; wait for whoever holds the turn to decide.",
+            Self::UnknownCode => "That code does not match any shared story.",
+            Self::SeatsFull => "There are no free places left in that shared story.",
+            Self::NotShared => {
+                "This story is not shared. Type \"share\" (compartir) to open it to others."
+            }
+            Self::UnknownMember => "No participant has that name.",
+            Self::InvalidSetting => "Invalid value: the vote window is 30 to 120 seconds.",
+            Self::NoParser => {
+                "This story does not understand free text: choose one of the numbered actions."
+            }
+            Self::InvalidCommand => {
+                "Type a command of up to 256 bytes while the story shows its \">\" prompt."
+            }
+            Self::UnknownLocale => {
+                "This story is not available in that language. Type \"story <id>\" to play it in its default language."
+            }
+            Self::CommandsRateLimited => "Too many commands in a row. Please wait a moment.",
+            Self::Script => {
                 "The story could not apply that action and nothing changed. Try something else or try again."
             }
-            Self::Busy if english => "The story is busy. Please try again.",
-            _ => self.message(),
         }
     }
 
@@ -1349,6 +1468,9 @@ impl StoryMetrics {
 pub struct StoryProjection {
     pub story_id: String,
     pub title: String,
+    /// Language of the instance: the pack text of the view and the
+    /// server's own labels around it ([`messages`]).
+    pub locale: String,
     pub view_rev: u32,
     pub turn: u32,
     pub score: i64,
@@ -1517,6 +1639,8 @@ fn encoded_len<T: serde::Serialize>(value: &T) -> usize {
 /// Renders a projection as plain Telnet text with numbered actions. The text
 /// carries every playable fact; media and GMCP are optional.
 pub fn render_text(projection: &StoryProjection) -> String {
+    let locale = projection.locale.as_str();
+    let lang = messages::Lang::of(locale);
     let mut text = String::new();
     let mut stats = Vec::new();
     let mut inventory = Vec::new();
@@ -1561,10 +1685,14 @@ pub fn render_text(projection: &StoryProjection) -> String {
                     let _ = write!(text, "{line}\r\n");
                 }
             }
+            // The portrait of a dialogue line is web-only: the speaker name
+            // already is its text equivalent, so Telnet does not repeat the
+            // alt text on every line.
             StoryItem::Block {
                 kind: StoryBlockKind::Line,
                 speaker,
                 text: line,
+                ..
             } => match speaker {
                 Some(speaker) => {
                     let _ = write!(text, "{speaker}: «{line}»\r\n");
@@ -1580,62 +1708,74 @@ pub fn render_text(projection: &StoryProjection) -> String {
         }
     }
     if !present.is_empty() {
-        let _ = write!(text, "Presentes: {}\r\n", present.join(", "));
+        let label = lang.pick("Presentes", "Present");
+        let _ = write!(text, "{label}: {}\r\n", present.join(", "));
     }
-    let mut status = format!(
-        "Turno {} · Puntuación {}",
-        projection.turn, projection.score
-    );
+    let mut status = if lang.is_english() {
+        format!("Turn {} · Score {}", projection.turn, projection.score)
+    } else {
+        format!(
+            "Turno {} · Puntuación {}",
+            projection.turn, projection.score
+        )
+    };
     for stat in &stats {
         let _ = write!(status, " · {stat}");
     }
     let _ = write!(text, "[{status}]\r\n");
+    let inventory_label = lang.pick("Inventario", "Inventory");
     if inventory.is_empty() {
-        text.push_str("Inventario: (vacío)\r\n");
+        let empty = lang.pick("(vacío)", "(empty)");
+        let _ = write!(text, "{inventory_label}: {empty}\r\n");
     } else {
-        let _ = write!(text, "Inventario: {}\r\n", inventory.join(", "));
+        let _ = write!(text, "{inventory_label}: {}\r\n", inventory.join(", "));
     }
     if let Some(ending) = projection.ending {
-        let _ = write!(
-            text,
-            "FIN — {}. Puntuación final: {}.\r\n",
-            ending_label(ending),
-            projection.score
-        );
-        text.push_str("Escribe «salir» (leave) para volver al mundo");
-        if projection.can_undo {
-            text.push_str(" o «deshacer» (undo)");
+        let label = messages::ending_label(ending, locale);
+        if lang.is_english() {
+            let _ = write!(
+                text,
+                "THE END — {label}. Final score: {}.\r\n",
+                projection.score
+            );
+            text.push_str("Type \"leave\" (salir) to return to the world");
+            if projection.can_undo {
+                text.push_str(" or \"undo\" (deshacer)");
+            }
+        } else {
+            let _ = write!(
+                text,
+                "FIN — {label}. Puntuación final: {}.\r\n",
+                projection.score
+            );
+            text.push_str("Escribe «salir» (leave) para volver al mundo");
+            if projection.can_undo {
+                text.push_str(" o «deshacer» (undo)");
+            }
         }
         text.push_str(".\r\n");
     } else {
         for (index, action) in projection.actions().iter().enumerate() {
             let _ = write!(text, "{}) {}\r\n", index + 1, action.label());
         }
-        match projection.prompt() {
-            Some(prompt) if prompt.question => {
-                text.push_str(
-                    "Responde a la pregunta o escribe otra orden; «deshacer» (undo) o «salir» (leave).\r\n",
-                );
-            }
-            Some(_) => {
-                text.push_str(
-                    "Escribe una orden (por ejemplo «mira», «inventario» o «coge la llave»), «deshacer» (undo) o «salir» (leave).\r\n",
-                );
-            }
-            None => text.push_str(
-                "Escribe un número para elegir, «deshacer» (undo) o «salir» (leave).\r\n",
+        let hint = match projection.prompt() {
+            Some(prompt) if prompt.question => lang.pick(
+                "Responde a la pregunta o escribe otra orden; «deshacer» (undo) o «salir» (leave).",
+                "Answer the question or type another command; \"undo\" (deshacer) or \"leave\" (salir).",
             ),
-        }
+            Some(_) => lang.pick(
+                "Escribe una orden (por ejemplo «mira», «inventario» o «coge la llave»), «deshacer» (undo) o «salir» (leave).",
+                "Type a command (for example \"look\", \"inventory\" or \"take the key\"), \"undo\" (deshacer) or \"leave\" (salir).",
+            ),
+            None => lang.pick(
+                "Escribe un número para elegir, «deshacer» (undo) o «salir» (leave).",
+                "Type a number to choose, \"undo\" (deshacer) or \"leave\" (salir).",
+            ),
+        };
+        text.push_str(hint);
+        text.push_str("\r\n");
     }
     text
-}
-
-pub const fn ending_label(kind: StoryEndingKind) -> &'static str {
-    match kind {
-        StoryEndingKind::Victory => "victoria",
-        StoryEndingKind::Defeat => "derrota",
-        StoryEndingKind::Neutral => "final",
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1831,73 +1971,74 @@ pub fn parse_parser_story_input(input: &str) -> StoryInputCommand {
     }
 }
 
-/// Help of a parser story.
+/// Help of a parser story (Spanish; [`messages::parser_help`] localizes it).
 pub const PARSER_STORY_HELP: &str = "Historia con parser: escribe órdenes como «mira», «inventario», «coge la llave», «n» o «abre la puerta con la llave». También «deshacer» (undo), «guardar N» (save), «cargar N» (load), «partidas» (saves) o «salir» (leave).";
 
+/// Help of a solo story (Spanish; [`messages::input_help`] localizes it).
 pub const STORY_INPUT_HELP: &str = "Estás absorto en una historia: escribe un número para elegir, «ver» (look), «deshacer» (undo), «guardar N» (save), «cargar N» (load), «partidas» (saves), «borrar N» (delete), «compartir» (share) o «salir» (leave).";
 
-/// Help of a shared instance.
+/// Help of a shared instance (Spanish; [`messages::shared_help`] localizes it).
 pub const SHARED_STORY_HELP: &str = "Historia compartida: un número o «votar N» (vote N) elige o vota, «votar 0» retira tu voto, «asientos» (seats) muestra la sala; el anfitrión puede «invitar <nombre>» (invite), «expulsar <nombre>» (kick), «modo anfitrion|votacion|turnos [segundos]» (mode host|vote|turns), «deshacer» (undo) y guardar o cargar partidas. «salir» (leave) deja tu asiento.";
 
-pub const fn mode_label(mode: StoryDecisionMode) -> &'static str {
-    match mode {
-        StoryDecisionMode::Host => "decide el anfitrión",
-        StoryDecisionMode::Vote => "votación por mayoría",
-        StoryDecisionMode::Turns => "turnos rotatorios",
-    }
-}
-
-/// Text rendering of `story.lobby` for Telnet and `command.submit`.
-pub fn render_lobby(lobby: &protocol::StoryLobby) -> String {
+/// Text rendering of `story.lobby` for Telnet and `command.submit`, in the
+/// story's `locale`.
+pub fn render_lobby(lobby: &protocol::StoryLobby, locale: &str) -> String {
+    let lang = messages::Lang::of(locale);
     let mut text = format!(
-        "Historia compartida · {} · plazo {} s",
-        mode_label(lobby.mode),
+        "{} · {} · {} {} s",
+        lang.pick("Historia compartida", "Shared story"),
+        messages::mode_label(lobby.mode, locale),
+        lang.pick("plazo", "window"),
         lobby.vote_seconds
     );
     if let Some(code) = &lobby.code {
         let _ = write!(
             text,
-            "\nCódigo para unirse: {code} (historia unirse {code} / story join {code})"
+            "\n{}: {code} (historia unirse {code} / story join {code})",
+            lang.pick("Código para unirse", "Join code")
         );
     }
     let _ = write!(
         text,
-        "\nAsientos ({}/{}):",
+        "\n{} ({}/{}):",
+        lang.pick("Asientos", "Seats"),
         lobby.seats.len(),
         lobby.max_seats
     );
     for (index, seat) in lobby.seats.iter().enumerate() {
         let _ = write!(text, "\n  {}. {}", index + 1, seat.name);
         if seat.role == StorySeatRole::Host {
-            text.push_str(" (anfitrión)");
+            let _ = write!(text, " ({})", messages::role_label(seat.role, locale));
         }
         if !seat.connected {
-            text.push_str(" (desconectado; asiento reservado)");
+            text.push_str(lang.pick(
+                " (desconectado; asiento reservado)",
+                " (disconnected; seat kept)",
+            ));
         }
         if seat.turn {
-            text.push_str(" ← turno");
+            text.push_str(lang.pick(" ← turno", " ← turn"));
         }
     }
     let _ = write!(
         text,
-        "\nEspectadores: {}/{}. Tú: {}.",
+        "\n{}: {}/{}. {}: {}.",
+        lang.pick("Espectadores", "Spectators"),
         lobby.spectators,
         lobby.max_spectators,
-        match lobby.you {
-            StorySeatRole::Host => "anfitrión",
-            StorySeatRole::Player => "jugador",
-            StorySeatRole::Spectator => "espectador",
-        }
+        lang.pick("Tú", "You"),
+        messages::role_label(lobby.you, locale)
     );
     text
 }
 
 /// One-line text rendering of `story.tally` against the numbered actions of
-/// `view`. `None` when there is nothing to report.
+/// `view`, in the view's locale. `None` when there is nothing to report.
 pub fn render_tally(tally: &protocol::StoryTally, view: &StoryProjection) -> Option<String> {
     if tally.view_rev != view.view_rev || view.ending.is_some() {
         return None;
     }
+    let lang = messages::Lang::of(&view.locale);
     let actions = view.actions();
     let number = |id: &str| {
         actions
@@ -1906,17 +2047,26 @@ pub fn render_tally(tally: &protocol::StoryTally, view: &StoryProjection) -> Opt
             .map(|index| index + 1)
     };
     let mut text = match tally.mode {
-        StoryDecisionMode::Vote => format!("Votos ({}/{}):", tally.voted, tally.eligible),
+        StoryDecisionMode::Vote => format!(
+            "{} ({}/{}):",
+            lang.pick("Votos", "Votes"),
+            tally.voted,
+            tally.eligible
+        ),
         StoryDecisionMode::Host => {
             if tally.choices.is_empty() {
                 return None;
             }
-            "Votos orientativos (decide el anfitrión):".to_owned()
+            lang.pick(
+                "Votos orientativos (decide el anfitrión):",
+                "Advisory votes (the host decides):",
+            )
+            .to_owned()
         }
         StoryDecisionMode::Turns => return None,
     };
     if tally.choices.is_empty() {
-        text.push_str(" ninguno todavía");
+        text.push_str(lang.pick(" ninguno todavía", " none yet"));
     }
     for entry in &tally.choices {
         if let Some(number) = number(&entry.choice_id) {
@@ -1924,46 +2074,67 @@ pub fn render_tally(tally: &protocol::StoryTally, view: &StoryProjection) -> Opt
         }
     }
     if let Some(seconds) = tally.remaining_seconds {
-        let _ = write!(text, " · cierra en {seconds} s");
+        let _ = write!(
+            text,
+            " · {} {seconds} s",
+            lang.pick("cierra en", "closes in")
+        );
     }
     if let Some(number) = tally.your_vote.as_deref().and_then(number) {
-        let _ = write!(text, " · tu voto: {number}");
+        let _ = write!(text, " · {}: {number}", lang.pick("tu voto", "your vote"));
     }
     Some(text)
 }
 
 /// Renders the slot listing of the current story for text clients.
-pub fn render_slots(slots: &[protocol::StorySlotSummary]) -> String {
+pub fn render_slots(slots: &[protocol::StorySlotSummary], locale: &str) -> String {
+    let lang = messages::Lang::of(locale);
     if slots.is_empty() {
-        return "No tienes partidas guardadas de esta historia. Escribe «guardar N» (save N) con N del 1 al 9.".to_owned();
+        return lang
+            .pick(
+                "No tienes partidas guardadas de esta historia. Escribe «guardar N» (save N) con N del 1 al 9.",
+                "You have no saved games of this story. Type \"save N\" (guardar N) with N from 1 to 9.",
+            )
+            .to_owned();
     }
-    let mut text = String::from("Partidas guardadas:");
+    let mut text = String::from(lang.pick("Partidas guardadas:", "Saved games:"));
     for slot in slots {
         let name = if slot.slot == 0 {
-            "0 (autoguardado)".to_owned()
+            format!("0 ({})", lang.pick("autoguardado", "autosave"))
         } else {
             slot.slot.to_string()
         };
         let _ = write!(text, "\n  {name} — {}", format_utc(slot.updated_at));
         if !slot.compatible {
-            text.push_str(" (otra versión de la historia; no se puede cargar)");
+            text.push_str(lang.pick(
+                " (otra versión de la historia; no se puede cargar)",
+                " (another version of the story; cannot be loaded)",
+            ));
         }
     }
-    text.push_str("\nEscribe «cargar N» (load N) para cargar o «borrar N» (delete N) para borrar.");
+    text.push_str(lang.pick(
+        "\nEscribe «cargar N» (load N) para cargar o «borrar N» (delete N) para borrar.",
+        "\nType \"load N\" (cargar N) to load or \"delete N\" (borrar N) to delete.",
+    ));
     text
 }
 
 /// The entry offer for text clients, when a compatible autosave exists.
-pub fn render_continue_offer(slots: &protocol::StorySlots) -> Option<String> {
+pub fn render_continue_offer(slots: &protocol::StorySlots, locale: &str) -> Option<String> {
     let autosave = slots
         .slots
         .iter()
         .find(|slot| slot.slot == 0 && slot.compatible)
         .filter(|_| slots.offer_continue)?;
-    Some(format!(
-        "Tienes una partida autoguardada ({}). Escribe «continuar» (continue) para retomarla o juega para empezar de nuevo.",
-        format_utc(autosave.updated_at)
-    ))
+    let when = format_utc(autosave.updated_at);
+    Some(match messages::Lang::of(locale) {
+        messages::Lang::Es => format!(
+            "Tienes una partida autoguardada ({when}). Escribe «continuar» (continue) para retomarla o juega para empezar de nuevo."
+        ),
+        messages::Lang::En => format!(
+            "You have an autosaved game ({when}). Type \"continue\" (continuar) to resume it or play on to start over."
+        ),
+    })
 }
 
 /// `YYYY-MM-DD HH:MM UTC` for Unix seconds (proleptic Gregorian calendar).
@@ -1987,13 +2158,25 @@ pub fn format_utc(seconds: i64) -> String {
     )
 }
 
-/// Renders the catalog listing for `historias`.
-pub fn render_listing(listing: &[(String, String)]) -> String {
-    let mut text = String::from("Historias disponibles:");
-    for (id, title) in listing {
-        let _ = write!(text, "\n  {id} — {title}");
+/// Renders the catalog listing for `historias`/`stories`: each story with
+/// the languages it can be played in (default first). Outside a story the
+/// session has no story locale, so the frame text stays in Spanish.
+pub fn render_listing(listing: &[StoryListing], locale: &str) -> String {
+    let lang = messages::Lang::of(locale);
+    let mut text = String::from(lang.pick("Historias disponibles:", "Available stories:"));
+    for story in listing {
+        let _ = write!(
+            text,
+            "\n  {} — {} [{}]",
+            story.id,
+            story.title,
+            story.locales.join(", ")
+        );
     }
-    text.push_str("\nEscribe «historia <id>» (story <id>) para empezar.");
+    text.push_str(lang.pick(
+        "\nEscribe «historia <id>» (story <id>) para empezar en el primer idioma o «historia <id> <idioma>» (story <id> <locale>) para elegir otro.",
+        "\nType \"story <id>\" (historia <id>) to start in the first language or \"story <id> <locale>\" (historia <id> <idioma>) to choose another one.",
+    ));
     text
 }
 
@@ -2611,7 +2794,7 @@ impl StoryManager {
         let _ = self.inner.store.set(store);
     }
 
-    pub fn listing(&self) -> Vec<(String, String)> {
+    pub fn listing(&self) -> Vec<StoryListing> {
         self.inner.catalog.listing()
     }
 
@@ -4134,13 +4317,6 @@ struct Instance {
     script_failures: u32,
 }
 
-const RESTART_CONFIRM_NOTE: &str = "¿Seguro que quieres reiniciar la historia desde el principio? Escribe «reiniciar» otra vez para confirmarlo; cualquier otra orden lo cancela. Podrás «deshacer» el reinicio.";
-const RESTARTED_NOTE: &str = "La historia vuelve a empezar.";
-const SAVE_NOTE: &str =
-    "Para guardar escribe «guardar N» (ranuras 1 a 9) o usa el panel de partidas guardadas.";
-const RESTORE_NOTE: &str = "Para cargar escribe «cargar N» (la ranura 0 es el autoguardado) o usa el panel de partidas guardadas.";
-const QUIT_NOTE: &str = "Sales de la historia.";
-
 impl Instance {
     /// A new instance before its first projection ([`Instance::start`]).
     /// Nothing here evaluates a script.
@@ -4156,6 +4332,7 @@ impl Instance {
         let current = StoryProjection {
             story_id: story.id.clone(),
             title: story.title_in(&locale),
+            locale: locale.clone(),
             view_rev: 0,
             turn: 0,
             score: 0,
@@ -4450,26 +4627,38 @@ impl Instance {
                     stepped.state,
                     &stepped.events,
                     echo,
-                    vec![RESTART_CONFIRM_NOTE],
+                    vec![messages::restart_confirm_note(&self.locale)],
                     media,
                 )?;
                 self.restart_armed = Some(self.view_rev);
                 Ok(reply(view, None))
             }
             Some("save") => self
-                .apply(stepped.state, &stepped.events, echo, vec![SAVE_NOTE], media)
+                .apply(
+                    stepped.state,
+                    &stepped.events,
+                    echo,
+                    vec![messages::save_note(&self.locale)],
+                    media,
+                )
                 .map(|view| reply(view, Some(CommandFollowUp::Slots))),
             Some("restore") => self
                 .apply(
                     stepped.state,
                     &stepped.events,
                     echo,
-                    vec![RESTORE_NOTE],
+                    vec![messages::restore_note(&self.locale)],
                     media,
                 )
                 .map(|view| reply(view, Some(CommandFollowUp::Slots))),
             Some("quit") => self
-                .apply(stepped.state, &stepped.events, echo, vec![QUIT_NOTE], media)
+                .apply(
+                    stepped.state,
+                    &stepped.events,
+                    echo,
+                    vec![messages::quit_note(&self.locale)],
+                    media,
+                )
                 .map(|view| reply(view, Some(CommandFollowUp::Leave))),
             // `score` and `help` are already answered in the transcript.
             _ => self
@@ -4532,7 +4721,7 @@ impl Instance {
         let music = self.music.clone();
         self.undo.push(previous.clone());
         self.echo = echo;
-        self.notes = vec![RESTARTED_NOTE];
+        self.notes = vec![messages::restarted_note(&self.locale)];
         if let Err(error) = self.project(&events, media) {
             self.state = previous;
             self.music = music;
@@ -4671,6 +4860,7 @@ impl Instance {
             .map(|text| StoryItem::Block {
                 kind: StoryBlockKind::Event,
                 speaker: None,
+                portrait: None,
                 text: bounded_text(&text),
             })
             .collect::<Vec<_>>();
@@ -4722,6 +4912,7 @@ impl Instance {
                             items.push(StoryItem::Block {
                                 kind: StoryBlockKind::Command,
                                 speaker: None,
+                                portrait: None,
                                 text: echo.clone(),
                             });
                         }
@@ -4737,14 +4928,28 @@ impl Instance {
                         name,
                         image: asset.and_then(|id| media.image(&id, &locale)),
                     }),
-                    PageItem::Block { speaker, text, .. } => items.push(StoryItem::Block {
-                        kind: StoryBlockKind::Line,
+                    // A dialogue line resolves its speaker's expression
+                    // portrait through the same reviewed media map; an id
+                    // without an entry (or a line without a speaker) only
+                    // loses the picture, never the text.
+                    PageItem::Block {
                         speaker,
+                        portrait,
                         text,
-                    }),
+                    } => {
+                        let portrait = portrait
+                            .filter(|_| speaker.is_some())
+                            .and_then(|id| media.image(&id, &locale));
+                        items.push(StoryItem::Block {
+                            kind: StoryBlockKind::Line,
+                            speaker,
+                            portrait,
+                            text,
+                        });
+                    }
                     PageItem::Stat { label, value } => items.push(StoryItem::Stat {
                         label,
-                        value: render_value(value),
+                        value: render_value(value, &locale),
                     }),
                     PageItem::Item { name } => items.push(StoryItem::Item { name }),
                     PageItem::Choice { token, label } => {
@@ -4841,6 +5046,7 @@ impl Instance {
             notes.into_iter().map(|note| StoryItem::Block {
                 kind: StoryBlockKind::Reply,
                 speaker: None,
+                portrait: None,
                 text: note.to_owned(),
             }),
         );
@@ -4850,6 +5056,7 @@ impl Instance {
         self.current = StoryProjection {
             story_id: story.id.clone(),
             title,
+            locale,
             view_rev: self.view_rev,
             turn,
             score,
@@ -4921,11 +5128,10 @@ fn resolve(text: &tiamud_story_core::LocalizedText, locale: &str) -> String {
     text.resolve(locale).unwrap_or_default().to_owned()
 }
 
-fn render_value(value: Value) -> String {
+fn render_value(value: Value, locale: &str) -> String {
     match value {
         Value::Int(value) => value.to_string(),
-        Value::Bool(true) => "sí".to_owned(),
-        Value::Bool(false) => "no".to_owned(),
+        Value::Bool(value) => messages::yes_no(value, locale).to_owned(),
     }
 }
 
@@ -4959,6 +5165,7 @@ fn echo_text(text: &str) -> Option<String> {
 /// entries, menu bookkeeping and media cues produce no text (menu responses
 /// and dialogue lines arrive as `line` blocks of the view itself).
 fn render_event(pack: &StoryPack, event: &StoryEvent, locale: &str) -> Option<String> {
+    let lang = messages::Lang::of(locale);
     match event {
         StoryEvent::VariableChanged { var, from, to, .. } => {
             let decl = pack
@@ -4972,20 +5179,28 @@ fn render_event(pack: &StoryPack, event: &StoryEvent, locale: &str) -> Option<St
                 .unwrap_or_else(|| decl.id.clone());
             Some(format!(
                 "{label}: {} → {}",
-                render_value(*from),
-                render_value(*to)
+                render_value(*from, locale),
+                render_value(*to, locale)
             ))
         }
-        StoryEvent::ItemGained { item } => pack
-            .items
-            .iter()
-            .find(|decl| &decl.id == item)
-            .map(|decl| format!("Obtienes: {}", resolve(&decl.name, locale))),
-        StoryEvent::ItemLost { item } => pack
-            .items
-            .iter()
-            .find(|decl| &decl.id == item)
-            .map(|decl| format!("Pierdes: {}", resolve(&decl.name, locale))),
+        StoryEvent::ItemGained { item } => {
+            pack.items.iter().find(|decl| &decl.id == item).map(|decl| {
+                format!(
+                    "{}: {}",
+                    lang.pick("Obtienes", "You get"),
+                    resolve(&decl.name, locale)
+                )
+            })
+        }
+        StoryEvent::ItemLost { item } => {
+            pack.items.iter().find(|decl| &decl.id == item).map(|decl| {
+                format!(
+                    "{}: {}",
+                    lang.pick("Pierdes", "You lose"),
+                    resolve(&decl.name, locale)
+                )
+            })
+        }
         StoryEvent::DiceRolled {
             count,
             sides,
@@ -4994,7 +5209,7 @@ fn render_event(pack: &StoryPack, event: &StoryEvent, locale: &str) -> Option<St
             total,
             passed,
         } => {
-            let mut text = format!("Tirada {count}d{sides}");
+            let mut text = format!("{} {count}d{sides}", lang.pick("Tirada", "Roll"));
             if *modifier != 0 {
                 let _ = write!(text, "{modifier:+}");
             }
@@ -5005,13 +5220,18 @@ fn render_event(pack: &StoryPack, event: &StoryEvent, locale: &str) -> Option<St
                 .join(", ");
             let _ = write!(text, ": [{faces}] → total {total}");
             if let Some(passed) = passed {
-                text.push_str(if *passed { " (éxito)" } else { " (fallo)" });
+                text.push_str(if *passed {
+                    lang.pick(" (éxito)", " (success)")
+                } else {
+                    lang.pick(" (fallo)", " (failure)")
+                });
             }
             Some(text)
         }
-        StoryEvent::ScoreChanged { delta, total } => {
-            Some(format!("Puntuación {delta:+} (total {total})"))
-        }
+        StoryEvent::ScoreChanged { delta, total } => Some(format!(
+            "{} {delta:+} (total {total})",
+            lang.pick("Puntuación", "Score")
+        )),
         StoryEvent::NodeEntered { .. }
         | StoryEvent::Cue(_)
         | StoryEvent::Ended(_)

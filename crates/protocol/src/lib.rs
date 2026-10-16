@@ -121,6 +121,8 @@ pub enum ServerMessageType {
     StoryTally,
     #[serde(rename = "story.invitation")]
     StoryInvitation,
+    #[serde(rename = "story.catalog")]
+    StoryCatalog,
 }
 
 impl ServerMessageType {
@@ -163,6 +165,7 @@ impl ServerMessageType {
             Self::StoryLobby => "story.lobby",
             Self::StoryTally => "story.tally",
             Self::StoryInvitation => "story.invitation",
+            Self::StoryCatalog => "story.catalog",
         }
     }
 }
@@ -215,6 +218,8 @@ pub enum ClientMessageType {
     StoryVote,
     #[serde(rename = "story.command")]
     StoryCommand,
+    #[serde(rename = "story.catalog")]
+    StoryCatalog,
 }
 
 /// A sequenced server→client envelope.
@@ -1003,11 +1008,17 @@ pub enum StoryItem {
         #[cfg_attr(test, ts(optional))]
         image: Option<StoryImage>,
     },
+    /// A line of text. A dialogue `line` with a `speaker` carries
+    /// `portrait` when the speaker's expression portrait is in the reviewed
+    /// media map; the speaker name stays its text equivalent.
     Block {
         kind: StoryBlockKind,
         #[serde(skip_serializing_if = "Option::is_none")]
         #[cfg_attr(test, ts(optional))]
         speaker: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(test, ts(optional))]
+        portrait: Option<StoryImage>,
         text: String,
     },
     /// A visible stat with its value rendered as text.
@@ -1146,6 +1157,33 @@ pub enum StoryErrorCode {
     InvalidCommand,
     /// The story cannot be played in the requested language.
     UnknownLocale,
+}
+
+/// Maximum languages one story offers (the StoryPack locale bound).
+pub const MAX_STORY_LOCALES: usize = 16;
+
+/// One story of the catalog: its public id, its title in the default
+/// language and every language it can be played in, default first. Entering
+/// with `historia <id> <locale>` (`command.submit`) picks one of them.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[cfg_attr(test, derive(TS))]
+#[serde(rename_all = "camelCase")]
+pub struct StoryCatalogEntry {
+    pub story_id: String,
+    pub title: String,
+    pub locales: Vec<String>,
+}
+
+/// `story.catalog`: the stories this server offers, in id order, answering
+/// `story.catalog {}` or the `historias`/`stories` command. A catalog whose
+/// encoding would exceed the frame budget is split into `parts` consecutive
+/// frames; the client concatenates `stories` of parts `0..parts` in order.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[cfg_attr(test, derive(TS))]
+pub struct StoryCatalog {
+    pub part: u16,
+    pub parts: u16,
+    pub stories: Vec<StoryCatalogEntry>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]

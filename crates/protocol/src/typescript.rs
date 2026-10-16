@@ -115,6 +115,9 @@ fn declarations(config: &Config) -> Vec<String> {
         StoryInvitation::decl(config),
         // Parser stories (ADR 0031 server wiring).
         StoryCommandData::decl(config),
+        // Story catalog with languages.
+        StoryCatalogEntry::decl(config),
+        StoryCatalog::decl(config),
     ]
 }
 
