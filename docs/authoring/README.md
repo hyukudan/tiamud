@@ -172,8 +172,7 @@ migrations, LRU, GC, network, compression, or remote signing. The historical 6C
 gate passes 774 Rust tests —329 from the server— and the re-audit 0 P1/0 P2.
 Disposable PostgreSQL 18 passes 20/20 adapter tests and 7/7 focused server tests,
 including the v14 CAS; the smoke binds G0, validates readiness/Web/Telnet, two
-resident areas, `noop`, and a clean shutdown. See the
-[PostgreSQL v14/PWA acceptance log](../project/log/2026-07-17-postgresql-v14-and-pwa-acceptance.md),
+resident areas, `noop`, and a clean shutdown. See
 [ADR 0005](../decisions/0005-hot-area-lifecycle.md),
 [ADR 0020](../decisions/0020-additive-local-area-loading.md), and
 [ADR 0021](../decisions/0021-quiescent-area-generation-cutover.md), and see

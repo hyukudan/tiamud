@@ -5,7 +5,7 @@ adventure" with stats and dice) for the separate narrative ruleset accepted in
 [ADR 0025](../decisions/0025-narrative-ruleset-story-core.md). It is not a
 WorldPack and shares no game state with the MUD.
 
-Current status (see the [completion matrix](../project/COMPLETION_MATRIX.md)):
+Current status:
 the pure ruleset (`crates/story-core`, phase S0) and the offline authoring tools
 (`crates/story-tools`, binary `tiamud-story`, phase S1 tooling) exist. Format
 v2 adds menu-driven adventures — verb menus, hotspots, speakers with portraits

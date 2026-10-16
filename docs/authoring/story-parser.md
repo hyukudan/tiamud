@@ -7,7 +7,7 @@ library) and in English. It turns a player line such as
 `coge la llave dorada y ábrela` or `put the lamp in the box` into typed
 commands whose objects are ids supplied by the caller.
 
-Current status (see the [completion matrix](../project/COMPLETION_MATRIX.md)):
+Current status:
 the parser is integrated with `tiamud-story-core` as **StoryPack format v3**
 (parser worlds), accepted in
 [ADR 0031](../decisions/0031-parser-interactive-fiction-storypack-v3.md) —

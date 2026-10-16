@@ -160,8 +160,7 @@ an explicitly repeated identical request returns the prior result; reusing an
 ID for a different action is a protocol error. General event replay is
 intentionally outside v1.
 
-See the authoritative [wire contract](../../docs/protocol/tiamud-v1.md) and
-[completion matrix](../../docs/project/COMPLETION_MATRIX.md).
+See the authoritative [wire contract](../../docs/protocol/tiamud-v1.md).
 
 ## Accessibility evidence
 
@@ -180,8 +179,8 @@ on the most recent validation host because the required GTK/GStreamer, media
 and related runtime libraries were absent; this is neither an observed
 application failure nor a current WebKit pass. A retained
 historical log records an earlier WebKit run with a temporary user-space
-host-library setup. The authoritative current status is kept in the
-[completion matrix](../../docs/project/COMPLETION_MATRIX.md).
+host-library setup. The authoritative current status is kept in the project's
+private completion records.
 
 ## License
 

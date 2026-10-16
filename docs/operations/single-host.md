@@ -675,8 +675,8 @@ with a summary, a UTF-8 prefix of `body`, `truncated: true` and `overflow` with
 packet, maximum and original bytes. The equivalent `Tiamud.Mail.Message`
 fallback is defensive: the canonical 2,048-byte mail body normally fits in
 full.
-The repository's retained [PostgreSQL 18 schema-v8 acceptance
-run](../project/log/2026-07-16-postgresql-v8-acceptance.md) proves the earlier v8 adapter,
+A retained PostgreSQL 18 schema-v8 acceptance
+run proves the earlier v8 adapter,
 verified SQLite recovery, atomic mover, mixed runtime gameplay and durable
 authenticated restart against a separate disposable server process. Separately,
 an isolated checksummed PostgreSQL 18.4 instance passes the v13 adapter and
@@ -788,8 +788,7 @@ binds G0 `e954be…15a6` at sequence 1, confirms PostgreSQL/world readiness, Web
 200, the Telnet banner, two resident areas, SIGHUP `noop=1` and a clean
 actor/store shutdown. The retained SQLite smoke additionally covers G1
 activation, G0 rollback and restart. Keep the same procedure over disposable
-persistence and registry before a real installation and see the
-[PostgreSQL v14/PWA acceptance log](../project/log/2026-07-17-postgresql-v14-and-pwa-acceptance.md).
+persistence and registry before a real installation.
 
 ## Reversible retirement 6D: partial operational state
 

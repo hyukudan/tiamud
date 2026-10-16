@@ -6,8 +6,7 @@
   `crates/story-tools` y esquema JSON publicado) también existe. El modelo de
   núcleo de S4 (StoryPack v2 con menús, retratos y diálogos) se define en
   [ADR 0028](0028-story-menus-portraits-and-dialogue-trees.md) y existe solo
-  como biblioteca; ver
-  [`COMPLETION_MATRIX.md`](../project/COMPLETION_MATRIX.md).
+  como biblioteca.
   Nota de estado (2026-10-15): existe además una biblioteca aislada de parser
   de ficción interactiva castellano/inglés (`crates/story-parser`, entregada
   como «núcleo S4 del parser»; en la tabla de fases de este ADR el parser

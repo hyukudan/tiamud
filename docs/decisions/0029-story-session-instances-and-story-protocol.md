@@ -3,8 +3,7 @@
 - Estado: aceptada — implementación parcial. Implementada de forma incremental en este árbol como fase
   S2 de [ADR 0025](0025-narrative-ruleset-story-core.md) (un jugador, estado
   vivo en memoria; slots persistidos conectados después, ver la nota de estado
-  al final); ver
-  [`COMPLETION_MATRIX.md`](../project/COMPLETION_MATRIX.md). Aceptada por el propietario; no
+  al final). Aceptada por el propietario; no
   cambia decisiones previas ya aceptadas.
   2026-10-16: aceptado por el propietario.
 - Fecha: 2026-10-15
@@ -185,8 +184,6 @@ al desalojar, salir o reiniciar quedan matizadas así:
 - Límite por cuenta: 6 escrituras (guardar/borrar) y 30 lecturas por minuto
   (ráfaga 10) con el limitador de cubeta por clave del servidor.
 
-Ver el [registro de la conexión](../project/log/2026-10-15-story-save-slots-wired-s2-s3.md).
-
 ## Nota de estado (2026-10-15): catálogo con subdirectorios y parser
 
 Añadida después de la decisión; no cambia el estado propuesto. El catálogo
@@ -220,8 +217,6 @@ sobre el locale fijo:
 - El prompt del parser lo define el pack (`world.prompt`, ver
   [ADR 0031](0031-parser-interactive-fiction-storypack-v3.md)).
 
-Ver el [registro](../project/log/2026-10-15-story-presentation-locale-compat.md).
-
 ## Nota de estado (2026-10-16): catálogo con idiomas, selector web y texto localizado
 
 Añadida después de la decisión; no la cambia. Matiza lo dicho arriba sobre
@@ -239,5 +234,3 @@ el listado y sobre los mensajes del servidor en castellano:
   confirmaciones, etiquetas Telnet, listados y líneas de evento) sigue el
   locale de la sesión: inglés para `en`/`en-*`, castellano en otro caso y
   fuera de una historia.
-
-Ver el [registro](../project/log/2026-10-16-story-language-picker-and-dialogue-portraits.md).

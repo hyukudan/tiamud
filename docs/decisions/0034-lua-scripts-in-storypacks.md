@@ -8,7 +8,7 @@
   [nota de estado del cableado](#nota-de-estado-2026-10-15-cableado-a-las-sesiones-del-servidor)
   las sesiones del servidor ejecutan scripts solo con `TIAMUD_STORY_SCRIPTS=1`
   (desactivado por defecto: entonces el catálogo rechaza esos packs al
-  arrancar). Ver [`COMPLETION_MATRIX.md`](../project/COMPLETION_MATRIX.md).
+  arrancar).
   2026-10-16: aceptado por el propietario.
 - Fecha: 2026-10-15
 - Alcance: fase S6 de [ADR 0025](0025-narrative-ruleset-story-core.md)

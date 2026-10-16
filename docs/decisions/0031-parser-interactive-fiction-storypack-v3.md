@@ -5,7 +5,7 @@
   entrada, validador, lints, CLI y fixture) existe como biblioteca en
   `crates/story-core`, `crates/story-parser` y `crates/story-tools`. No hay
   cableado de servidor, protocolo `story.command`/`story.prompt`, Telnet ni
-  navegador. Ver [`COMPLETION_MATRIX.md`](../project/COMPLETION_MATRIX.md).
+  navegador.
   2026-10-16: aceptado por el propietario.
 - Fecha: 2026-10-15
 - Alcance: fase S5 de [ADR 0025](0025-narrative-ruleset-story-core.md)
@@ -242,8 +242,6 @@ la API pública `step_command`, sin cambiar `story-core` ni `story-parser`:
 - El catálogo examina también los subdirectorios directos de
   `TIAMUD_STORY_DIR`.
 
-Ver el [registro del cableado](../project/log/2026-10-15-story-parser-server-wiring-s5.md).
-
 ## Nota de estado (2026-10-15): prompt del pack y locale por sesión
 
 Añadida después de la decisión; no cambia el estado propuesto. `world.prompt`
@@ -253,4 +251,4 @@ locale por sesión: el jugador elige uno de los `world.lexicons` al entrar
 (`historia <id> en`) y el léxico del parser, la vista y las respuestas siguen
 ese locale. `compatible_revisions` (formato v3) declara revisiones con
 partidas cargables, ver [ADR 0030](0030-story-save-slots-and-schema-v16.md).
-El esquema JSON v3 publicado incluye ambos campos. Ver el [registro](../project/log/2026-10-15-story-presentation-locale-compat.md).
+El esquema JSON v3 publicado incluye ambos campos.

@@ -134,9 +134,7 @@ es read-only y exige la ruta exacta que `area-publish` publica por stdout.
 
 `unsigned_local` presupone un registro local en un host confiable. El lock no
 es una frontera contra un proceso que lo ignore o pueda mutar el registro; un
-escritor hostil y sus carreras TOCTOU quedan fuera de este modo. La evidencia
-final se conserva en el
-[registro 6A](../project/log/2026-07-17-area-catalog-bundles-phase-6a.md).
+escritor hostil y sus carreras TOCTOU quedan fuera de este modo.
 
 El catálogo completo conserva límites de bytes y entradas. V1 se valida de
 forma atómica antes de reemplazar su puntero local; una futura versión residente
@@ -414,15 +412,11 @@ opcional descargada no vuelve por sí sola no-ready al proceso.
 3. **Carga aditiva bajo demanda sin descarga, fase 6B implementada:** generación
    fijada, bundles verificados, portales diferidos, staging acotado, instalación
    atómica, compatibilidad y recuperación; todas las áreas usadas permanecen
-   residentes. Véanse [ADR 0020](0020-additive-local-area-loading.md) y el
-   [registro 6B](../project/log/2026-07-17-additive-local-area-loading-phase-6b.md).
+   residentes. Véase [ADR 0020](0020-additive-local-area-loading.md).
 4. **Sustitución quiescente, fase 6C implementada y aceptada:** generación
    completa, SIGHUP local, staging privado, cero sesiones/leases, identidad
    durable SQL v14, CAS con snapshot v7, recuperación y rollback explícito.
-   Véanse [ADR 0021](0021-quiescent-area-generation-cutover.md), el
-   [registro 6C](../project/log/2026-07-17-quiescent-area-generation-cutover-phase-6c.md)
-   y su
-   [aceptación PostgreSQL v14](../project/log/2026-07-17-postgresql-v14-and-pwa-acceptance.md).
+   Véase [ADR 0021](0021-quiescent-area-generation-cutover.md).
 5. **Retirada reversible, fase 6D parcial:** unidades SCC con cierre inverso,
    pins y epochs, snapshot v8, checkpoints SQL v15, retiro y rehidratación de la
    misma revisión. [ADR 0022](0022-reversible-area-unit-retirement.md) está

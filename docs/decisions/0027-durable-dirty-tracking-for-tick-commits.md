@@ -18,7 +18,7 @@ Hasta ahora cada tick confirmaba incondicionalmente, en una transacción, el
 `WorldRuntimeSnapshot` completo (hasta 2 MiB de JSON) y el agregado durable de
 **cada** personaje conectado, aunque el tick no hubiese cambiado nada durable.
 Cada comando hacía lo mismo con todos los personajes conectados. Una medición
-local (ver el [registro](../project/log/2026-10-15-hot-path-dirty-tracking-and-indexes.md))
+local
 con 200 personajes y ~7 000 instancias escribía ~1,4 MB por tick.
 
 Las garantías existentes que no pueden debilitarse son: escritor único, un

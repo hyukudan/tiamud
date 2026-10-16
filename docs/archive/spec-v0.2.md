@@ -12,7 +12,7 @@
 > Nota histórica: este documento conserva la propuesta previa a la entrega alfa
 > y no es el contrato vigente. Tiamud es el nombre definitivo. La
 > [especificación v0.3](../spec-v0.3.md), la
-> [matriz de completitud](../project/COMPLETION_MATRIX.md), la memoria y los ADR
+> matriz de completitud, la memoria y los ADR
 > describen el baseline actual, incluido snapshot v8/esquema SQL v15 y el estado
 > parcial de la retirada reversible 6D.
 

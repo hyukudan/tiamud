@@ -20,9 +20,7 @@ política, saldo o persistencia. Tampoco debe añadir una tabla SQL autoritativa
 paralela al actor ni trasladar temporalmente objetos a una ubicación que
 obligue a devolver propiedad a personajes desconectados.
 
-Esta decisión define el contrato implementado de fase 3D. La evidencia y los
-límites de su entrega se conservan en el
-[registro de fase](../project/log/2026-07-16-confirmed-trade-reservations-phase-3d.md).
+Esta decisión define el contrato implementado de fase 3D.
 
 ## Decisión
 

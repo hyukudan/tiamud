@@ -3,7 +3,7 @@
 - Estado: aceptada — implementación parcial. Gate 2 (superficie de
   retirada/rehidratación por staff) implementado el 2026-07-18, incluida la
   corrección del teardown que impedía la proyección tras retirar. Gates 1, 3, 4
-  y 5 siguen pendientes; ver [`COMPLETION_MATRIX.md`](../project/COMPLETION_MATRIX.md).
+  y 5 siguen pendientes.
 - Fecha: 2026-07-18
 - Desarrolla: [ADR 0022](0022-reversible-area-unit-retirement.md)
 - Continúa: [ADR 0005](0005-hot-area-lifecycle.md)

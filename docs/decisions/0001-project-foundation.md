@@ -28,7 +28,7 @@ The early system is easy to run, back up, and profile. Boundaries exist where me
 Open-source licensing was intentionally left for a separate decision and is
 now resolved by [ADR 0004](0004-open-source-licensing.md).
 
-Implementation progress does not amend this foundation decision. The current evidence and remaining full-scope work are maintained in the [completion matrix](../project/COMPLETION_MATRIX.md).
+Implementation progress does not amend this foundation decision. The current evidence and remaining full-scope work are maintained in the project's private completion records.
 
 ## Later amendment
 

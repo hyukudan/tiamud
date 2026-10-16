@@ -95,3 +95,6 @@ override.tf.json
 
 # Local AI reviews
 /docs/reviews/
+
+# Private project records (kept outside the repository)
+/docs/project/

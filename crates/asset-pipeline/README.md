@@ -163,5 +163,5 @@ optional generator, content classification, and a human-review timestamp;
 those fields participate in the content address.
 
 This is Tiamud's implemented codec-variant pipeline, not the semantic
-scene-condition system tracked separately in the project
-[completion matrix](../../docs/project/COMPLETION_MATRIX.md).
+scene-condition system tracked separately in the project's private completion
+records.

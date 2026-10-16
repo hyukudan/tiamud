@@ -20,14 +20,31 @@ código actual, las decisiones aceptadas y la evidencia retenida.
 
 Antes de un cambio material, lee en este orden:
 
-1. [`docs/project/PROJECT_MEMORY.md`](docs/project/PROJECT_MEMORY.md), contexto
+1. `../mud-private/docs/project/PROJECT_MEMORY.md` (privado, si existe), contexto
    técnico durable y notas de continuación.
-2. [`docs/project/COMPLETION_MATRIX.md`](docs/project/COMPLETION_MATRIX.md),
+2. `../mud-private/docs/project/COMPLETION_MATRIX.md` (privado, si existe),
    estado autoritativo de implementación y aceptación.
 3. Los ADR pertinentes en [`docs/decisions/`](docs/decisions/).
 4. [`docs/spec-v0.3.md`](docs/spec-v0.3.md), el diseño relevante y el código.
-5. Los registros fechados de [`docs/project/log/`](docs/project/log/) solo si
+5. Los registros fechados de `../mud-private/docs/project/log/` (privados) solo si
    importan comandos o evidencia histórica exactos.
+
+### Registros privados del proyecto
+
+La matriz de completitud, la memoria del proyecto y los registros fechados no
+se versionan en este repositorio. Viven en una copia privada y sin seguimiento
+fuera de él, en `../mud-private/docs/project/` relativo a la raíz del repositorio. Cuando ese
+directorio exista, léelos y actualízalos ahí como exige este contrato; si no
+existe, no lo inventes ni crees esos archivos dentro del repositorio. Nunca
+enlaces desde el repositorio a archivos privados ni vuelvas a añadir
+`docs/project/` al árbol versionado.
+
+Nada sobre la infraestructura del propietario pertenece al repositorio: hosts,
+IP, dominios propios, rutas o usuarios del sistema, paneles de hosting, kits de
+despliegue específicos de un host ni registros de instalación. Eso va solo al
+directorio privado. La documentación pública de despliegue
+(`docs/operations/single-host.md`, `deploy/`) permanece genérica y usa valores
+de ejemplo (`example.org`, `203.0.113.10`, `/home/user`).
 
 Precedencia de fuentes:
 
@@ -42,7 +59,7 @@ Precedencia de fuentes:
 
 No deduzcas implementación porque un ADR o una hoja de ruta describa algo. No
 cambies una decisión aceptada en silencio: añade o sustituye un ADR y actualiza
-matriz, memoria y documentación pública a la vez.
+a la vez la documentación pública y, si existen, matriz y memoria privadas.
 
 ## Identidad del producto y repositorio
 
@@ -143,7 +160,7 @@ matriz, memoria y documentación pública a la vez.
   ensamblado. Una escritura nueva de runtime debe pasar por
   `plan_runtime_write`. Sus pruebas PostgreSQL pasan en local sobre
   PostgreSQL 18.6 desechable (2026-10-16; 28/28 del adaptador+mover y 11/11
-  del servidor, [registro](docs/project/log/2026-10-16-postgresql-local-evidence.md));
+  del servidor);
   no es evidencia de CI ni humo integral.
 - Cada snapshot registra la secuencia cubierta y conserva atómicamente solo el
   sufijo diagnóstico cubierto de 10.000 secuencias.
@@ -526,10 +543,9 @@ matriz, memoria y documentación pública a la vez.
 
 La evidencia de pruebas integrada y retenida por fase (inventario 3A–3D, botín
 4A, recompensas/afijos 4B, telepatía 5A, emotes 5B, correo 5C, tablones 5D,
-catálogo 6A e histórica) se conserva en
-[`docs/project/PROJECT_MEMORY.md`](docs/project/PROJECT_MEMORY.md); los conteos
-exactos y el estado por fase son autoridad de
-[`docs/project/COMPLETION_MATRIX.md`](docs/project/COMPLETION_MATRIX.md).
+catálogo 6A e histórica) se conserva en la memoria privada
+`../mud-private/docs/project/PROJECT_MEMORY.md`; los conteos exactos y el estado por fase
+son autoridad de la matriz privada `../mud-private/docs/project/COMPLETION_MATRIX.md`.
 
 ### Voz espacial 5E implementada
 
@@ -538,8 +554,7 @@ cambiar WorldPack v9, AreaPack v8, WorldProject v2, snapshot v7 ni esquema SQL
 v13. Core, actor, Web, Telnet/GMCP, cliente y bot demuestran radio 1/3, BFS
 dirigido, ciclos/convergencia, exclusión de salidas secretas, máximo de 259
 salas, mute/bucket, ignore/block/deaf y rollback con cero entregas. La evidencia
-integrada se conserva en el
-[registro 5E](docs/project/log/2026-07-17-bounded-spatial-voice-phase-5e.md).
+integrada se conserva en el registro fechado privado de 5E.
 
 ### Carga local aditiva de áreas 6B implementada
 
@@ -552,8 +567,7 @@ coordinador, rollback durable del actor y rutas SQLite de recovery. Un humo real
 con el catálogo
 `e954be5b7e1d6918a1b87d5405d651f0fc52ee81996ab0c100cfcb1909ed15a6`
 abre Web/Telnet y readiness, deja dos áreas residentes en arranque vacío y
-cierra limpio. La evidencia agregada exacta se conserva en el
-[registro 6B](docs/project/log/2026-07-17-additive-local-area-loading-phase-6b.md).
+cierra limpio. La evidencia agregada exacta se conserva en el registro fechado privado de 6B.
 
 ### Sustitución quiescente de generaciones 6C implementada
 
@@ -570,9 +584,8 @@ humo PostgreSQL abre esquema 14, liga G0 `e954be…15a6` en secuencia 1, confirm
 readiness PostgreSQL/mundo, Web 200, banner Telnet, dos áreas residentes,
 SIGHUP `noop=1` y apagado actor/store limpio. Separadamente, el humo 6C sobre
 SQLite activa G1, revierte a G0 y recupera por restart con métricas exactas. La
-evidencia exacta está en el
-[registro 6C](docs/project/log/2026-07-17-quiescent-area-generation-cutover-phase-6c.md)
-y el [registro PostgreSQL/PWA](docs/project/log/2026-07-17-postgresql-v14-and-pwa-acceptance.md).
+evidencia exacta está en los registros fechados privados de 6C y de aceptación
+PostgreSQL/PWA.
 
 ### Retirada reversible de unidades de área 6D parcial
 
@@ -584,8 +597,7 @@ actor para retirar una unidad vacía de la misma revisión y rehidratarla ante
 entrada; recovery falla cerrado si manifiesto y checkpoints no coinciden. La
 fase permanece parcial hasta completar el E2E de restart, una superficie
 operativa acotada y la medición de ahorro real. La puerta local pasa; los
-conteos exactos por fase son autoridad de
-[`COMPLETION_MATRIX.md`](docs/project/COMPLETION_MATRIX.md) (6D: core 157,
+conteos exactos por fase son autoridad de la matriz privada (6D: core 157,
 servidor 337/337, PostgreSQL v15 22/22 del adaptador+mover y 8/8 del servidor).
 No existe LRU ni política automática de memoria.
 
@@ -649,7 +661,7 @@ No existe LRU ni política automática de memoria.
 | `worlds/` | Paquete canónico y áreas fuente |
 | `scripts/` | Humo, carga, soak, release y licencias |
 | `fuzz/` | Corpus, diccionarios y targets acotados |
-| `docs/` | Especificaciones, ADR, operación, memoria y evidencia |
+| `docs/` | Especificaciones, ADR, diseño, autoría, operación y protocolo |
 | `deploy/` | Caddy, systemd y entorno revisados |
 
 ## Flujo de cambios
@@ -657,7 +669,8 @@ No existe LRU ni política automática de memoria.
 ### Antes de editar
 
 - Inspecciona `git status` y conserva todo trabajo existente.
-- Lee módulo, pruebas, ADR/diseño, memoria y fila de matriz relevantes.
+- Lee módulo, pruebas, ADR/diseño y, si existen, memoria y fila de matriz
+  privadas relevantes.
 - Identifica primero la frontera autoritativa: dominio, persistencia,
   percepción, protocolo, presentación o autoría.
 - Prefiere cambios enfocados y reversibles; no tapes defectos de dominio solo
@@ -679,7 +692,8 @@ No existe LRU ni política automática de memoria.
 - Medios pasan por manifiestos revisados y percepción.
 - Usa aritmética checked/saturating y límites explícitos; falla cerrado ante
   autoridad, esquema o seguridad ambiguos.
-- Un cambio material actualiza matriz, memoria y registro fechado.
+- Un cambio material actualiza matriz, memoria y registro fechado en
+  `../mud-private/docs/project/` cuando existe; nunca dentro del repositorio.
 
 ### Archivos generados y sensibles
 
@@ -688,6 +702,9 @@ No existe LRU ni política automática de memoria.
 - Construye artefactos mundo/medios con herramientas del repo.
 - Nunca comitees `.env`, bases, logs operativos, reportes locales crudos,
   credenciales, tokens, claves o certificados.
+- Nunca comitees registros de estado del proyecto ni detalles de la
+  infraestructura del propietario (hosts, IP, dominios, rutas, usuarios, kits
+  de despliegue específicos); van al directorio privado.
 
 ## Verificación
 

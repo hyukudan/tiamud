@@ -2,8 +2,7 @@
 
 - Estado: aceptada — implementación parcial. Implementada como contenido del MUD (WorldPack v10,
   AreaPack v9, `tiamud-core`, cargador del servidor y datos de Lantern Square);
-  fue aceptada por el propietario el 2026-10-16. Ver
-  [`COMPLETION_MATRIX.md`](../project/COMPLETION_MATRIX.md).
+  fue aceptada por el propietario el 2026-10-16.
   2026-10-16: aceptado por el propietario.
 - Fecha: 2026-10-15
 - Alcance: dominio del MUD (`tiamud-core`, `world-pack`, `tiamud-server`).

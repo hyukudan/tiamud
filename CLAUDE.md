@@ -8,12 +8,16 @@ honesto de `AGENTS.md`.
 ## Orden de orientación
 
 1. `AGENTS.md`.
-2. `docs/project/PROJECT_MEMORY.md`.
-3. `docs/project/COMPLETION_MATRIX.md`.
+2. `../mud-private/docs/project/PROJECT_MEMORY.md` (privado, si existe).
+3. `../mud-private/docs/project/COMPLETION_MATRIX.md` (privado, si existe).
 4. ADR y diseño/especificación pertinentes.
 5. Implementación y pruebas actuales.
 
-Ante conflictos de estado, la matriz prevalece sobre registros antiguos y
+Las rutas `../mud-private/` son relativas a la raíz del repositorio. Los
+registros de estado, la memoria y los registros fechados del proyecto viven ahí,
+en una copia privada fuera del repositorio y sin versionar en él; nunca los
+vuelvas a añadir al repositorio. Ante conflictos de estado, la matriz privada
+prevalece sobre registros antiguos y
 texto obsoleto de un ADR. Los ADR siguen gobernando decisiones aceptadas.
 `docs/archive/spec-v0.2.md` es contexto histórico en castellano; `docs/spec-v0.3.md`
 describe el baseline vigente de personajes, inventario y medios.
@@ -34,10 +38,9 @@ No dupliques aquí el detalle: la descripción normativa completa vive en
 [`AGENTS.md`](AGENTS.md) (sección "Baseline implementado", invariantes y límites
 honestos). Los conteos de pruebas exactos, las versiones
 (WorldPack/AreaPack/snapshot/esquema SQL) y el estado por fase
-(`Complete`/`Partial`) son autoridad única de
-[`docs/project/COMPLETION_MATRIX.md`](docs/project/COMPLETION_MATRIX.md); la
-historia y la evidencia por fase, de
-[`docs/project/PROJECT_MEMORY.md`](docs/project/PROJECT_MEMORY.md). La evidencia
+(`Complete`/`Partial`) son autoridad única de la matriz privada
+`../mud-private/docs/project/COMPLETION_MATRIX.md`; la historia y la evidencia
+por fase, de `../mud-private/docs/project/PROJECT_MEMORY.md`. La evidencia
 local no es evidencia de CI, release ni producción.
 
 ## Reglas de decisión
@@ -102,11 +105,19 @@ retenida de 24 horas.
 Ante un cambio material:
 
 1. actualiza pruebas y artefactos generados;
-2. actualiza `docs/project/COMPLETION_MATRIX.md`;
-3. actualiza `docs/project/PROJECT_MEMORY.md`;
-4. añade o modifica el registro fechado pertinente;
+2. actualiza `../mud-private/docs/project/COMPLETION_MATRIX.md` si existe;
+3. actualiza `../mud-private/docs/project/PROJECT_MEMORY.md` si existe;
+4. añade o modifica el registro fechado pertinente en
+   `../mud-private/docs/project/log/` si existe;
 5. corrige README, especificación, diseño y operación que quedarían falsos; y
 6. añade un ADR antes de cambiar arquitectura aceptada.
+
+Los registros de estado, memoria, registros fechados y cualquier detalle de la
+infraestructura del propietario (hosts, IP, dominios propios, rutas, usuarios,
+paneles de hosting o kits de despliegue específicos) no pertenecen al
+repositorio: van solo a `../mud-private/`. Los ejemplos públicos usan valores
+genéricos (`example.org`, `203.0.113.10`, `/home/user`). No enlaces desde el
+repositorio a archivos privados.
 
 No reescribas registros históricos para que parezcan actuales. No conviertas
 un workflow configurado en un pase. No confundas la carga aditiva 6B con el

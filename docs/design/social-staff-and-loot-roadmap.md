@@ -5,9 +5,9 @@ Status: implementation audit and continuation design, 2026-07-17.
 This document distinguishes what Tiamud implements today from the systems that
 are common in some classic MUDs or convenient for a modern persistent world. It
 does not turn every historical precedent into a requirement. The code and the
-tests remain the authority over current behavior; the
-[completion matrix](../project/COMPLETION_MATRIX.md) keeps the authority over
-acceptance of the historical specification.
+tests remain the authority over current behavior; the project's private
+completion records keep the authority over acceptance of the historical
+specification.
 
 ## Executive summary
 

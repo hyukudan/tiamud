@@ -3,8 +3,7 @@
 - Estado: aceptada — implementación parcial. La capa de persistencia (esquema v16 en SQLite y
   PostgreSQL, migración v15→v16, mover, API de store y pruebas) está
   implementada y, desde la nota de estado del final, conectada a sesiones de
-  historia, protocolo y clientes. Ver
-  [`COMPLETION_MATRIX.md`](../project/COMPLETION_MATRIX.md).
+  historia, protocolo y clientes.
   2026-10-16: aceptado por el propietario.
 - Fecha: 2026-10-15
 - Alcance: fase S3 de [ADR 0025](0025-narrative-ruleset-story-core.md)
@@ -222,5 +221,4 @@ cuenta como compatibles en `story.slots`. El estado cargado de una revisión
 declarada se revalida contra el pack actual con
 `StoryState::from_json_slice`; si ya no encaja, la carga falla con
 `slot_incompatible` sin cambiar la partida viva (un fallo de la revisión
-exacta sigue siendo `slot_corrupt`). No hay migración. Ver el
-[registro](../project/log/2026-10-15-story-presentation-locale-compat.md).
+exacta sigue siendo `slot_corrupt`). No hay migración.

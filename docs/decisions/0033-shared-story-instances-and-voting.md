@@ -1,8 +1,7 @@
 # ADR 0033: instancias de historia compartidas, asientos y votación
 
 - Estado: aceptada — implementación parcial. Implementada de forma incremental en este árbol como fase
-  S7 de [ADR 0025](0025-narrative-ruleset-story-core.md) (parcial; ver
-  [`COMPLETION_MATRIX.md`](../project/COMPLETION_MATRIX.md)).
+  S7 de [ADR 0025](0025-narrative-ruleset-story-core.md) (parcial).
   2026-10-16: aceptado por el propietario.
 - Fecha: 2026-10-15
 - Alcance: `tiamud-server` (`story_sessions`, `story_sessions::shared`,

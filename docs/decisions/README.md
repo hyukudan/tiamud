@@ -1,8 +1,8 @@
 # Registro de decisiones (ADR)
 
 Los ADR gobiernan decisiones de arquitectura aceptadas; el estado de
-implementación por fase vive en
-[`../project/COMPLETION_MATRIX.md`](../project/COMPLETION_MATRIX.md).
+implementación por fase vive en los registros privados de completitud del
+proyecto, fuera del repositorio.
 
 | # | Título | Estado | Fase |
 | --- | --- | --- | --- |
@@ -42,5 +42,5 @@ implementación por fase vive en
 | [0034](0034-lua-scripts-in-storypacks.md) | Optional Lua scripts in StoryPacks | Aceptado (implementación parcial: biblioteca, herramientas y sesiones del servidor tras `TIAMUD_STORY_SCRIPTS=1`) | Narrativa S6 |
 | [0035](0035-sectioned-runtime-snapshot-storage-schema-v17.md) | Sectioned runtime snapshot storage (schema v17) | Aceptado (implementado en SQLite y PostgreSQL, esquema v17; pruebas PostgreSQL 18.6 locales verdes 2026-10-16, sin CI) | Actor de mundo / persistencia |
 
-El estado de fase (`Complete`/`Partial`) es autoridad de
-[`../project/COMPLETION_MATRIX.md`](../project/COMPLETION_MATRIX.md).
+El estado de fase (`Complete`/`Partial`) es autoridad de los registros privados
+de completitud del proyecto.

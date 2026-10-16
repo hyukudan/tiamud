@@ -10,15 +10,14 @@
   <a href="#license"><img src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg" alt="License: MIT OR Apache-2.0"></a>
   <a href="LICENSE-CONTENT.md"><img src="https://img.shields.io/badge/content-CC%20BY%204.0-lightgrey.svg" alt="Content: CC BY 4.0"></a>
   <a href="Cargo.toml"><img src="https://img.shields.io/badge/rust--version-1.88-b7410e.svg" alt="Declared rust-version: 1.88"></a>
-  <a href="docs/project/COMPLETION_MATRIX.md"><img src="https://img.shields.io/badge/status-pre--release%200.1.0-orange.svg" alt="Status: pre-release 0.1.0"></a>
+  <a href="#status-and-roadmap"><img src="https://img.shields.io/badge/status-pre--release%200.1.0-orange.svg" alt="Status: pre-release 0.1.0"></a>
 </p>
 
 <p align="center">
-  <a href="https://mud.example.org"><strong>Play in the browser</strong></a> ·
-  <code>mud.example.org:4100</code> (Telnet over TLS) ·
-  <a href="#quick-start">Run it locally</a> ·
+  <a href="#quick-start"><strong>Run it locally</strong></a> ·
   <a href="docs/authoring/story-packs.md">Write a story</a> ·
-  <a href="docs/project/COMPLETION_MATRIX.md">Status</a>
+  <a href="docs/operations/single-host.md">Deploy it</a> ·
+  <a href="#status-and-roadmap">Status</a>
 </p>
 
 ![Panoramic painterly view of Tiamud's medieval crossroads at dusk, rain reflected on the road, a blue lantern and several routes toward a distant city.](docs/images/tiamud-hero.webp)
@@ -46,18 +45,11 @@ Every fact and every action is available as text. The Svelte web client adds
 artwork, audio and accessible controls; a plain Telnet client is a first-class
 way to play, with TLS by default and optional ANSI colour, GMCP and terminal graphics.
 
-> [!NOTE]
-> **Public instance.** <https://mud.example.org> (web) and
-> `mud.example.org:4100` (Telnet over TLS) were installed on 2026-10-16
-> on a single host with PostgreSQL ([install log](docs/project/log/2026-10-16-example-first-install.md)).
-> It is a fresh public installation, not evidence of production use at scale:
-> no soak, load test, CI run or scheduled database backup is recorded for it.
-
 > [!IMPORTANT]
 > Tiamud is **pre-release** (`0.1.0`) and the `tiamud.v1` protocol is still
 > experimental. Many narrative and content features are deliberately
-> **Partial**. The [completion matrix](docs/project/COMPLETION_MATRIX.md) is the
-> single authority for what is complete, partial and pending.
+> **Partial**. See [Status and roadmap](#status-and-roadmap) for what is
+> complete, partial and pending.
 
 ## Contents
 
@@ -189,7 +181,7 @@ and the [authoring guide](docs/authoring/README.md).
 
 The narrative ruleset ([ADR 0025](docs/decisions/0025-narrative-ruleset-story-core.md))
 is separate from the MUD: a story never reads or writes world state. All of it
-is **Partial** in the matrix — implemented as working slices with local
+is **Partial** — implemented as working slices with local
 evidence, not yet accepted end to end.
 
 ### StoryPack formats
@@ -306,21 +298,20 @@ Measured on a shared local host with an in-memory store that serializes exactly
 what SQL would write (diagnostic figures, **no SQL I/O timed**, ±30 % run to
 run; not CI or production evidence):
 
-| Scenario | Before | After | Source |
+| Scenario | Before | After | Change |
 | --- | --- | --- | --- |
-| Mean tick, 50 characters / 5,524 objects | 696–1,033 ms | 7.3–8.7 ms | [hot-path log](docs/project/log/2026-10-15-hot-path-dirty-tracking-and-indexes.md) |
+| Mean tick, 50 characters / 5,524 objects | 696–1,033 ms | 7.3–8.7 ms | dirty tracking ([ADR 0027](docs/decisions/0027-durable-dirty-tracking-for-tick-commits.md)) |
 | Mean `move`, 50 characters | 432–437 ms | 7.8–11.1 ms | same |
 | Mean tick, 200 characters / 7,024 objects | 3,477–3,539 ms | 28.8–43.7 ms | same |
-| Bytes per `move` commit, 200 characters | 1,229,540 | 2,344 | [schema v17 log](docs/project/log/2026-10-15-sectioned-runtime-snapshot-schema-v17.md) |
+| Bytes per `move` commit, 200 characters | 1,229,540 | 2,344 | sectioned snapshot ([ADR 0035](docs/decisions/0035-sectioned-runtime-snapshot-storage-schema-v17.md)) |
 | Bytes per tick, 200 characters | 245,731 | 314 | same |
 
 Limits of those numbers: a commit that moves an item still rewrites the item
 section (about a third saved, not more); latency with the in-memory store did
 not change with sectioning, because actor work — not persistence — dominates;
 and splitting the item section further was measured with real SQL I/O and
-[rejected](docs/project/log/2026-10-16-item-instances-bucketing-measurement.md).
-PostgreSQL v16/v17 tests passed locally on a disposable PostgreSQL 18.6
-([log](docs/project/log/2026-10-16-postgresql-local-evidence.md)), not in CI.
+rejected. PostgreSQL v16/v17 tests passed locally on a disposable PostgreSQL
+18.6, not in CI.
 
 ## Quick start
 
@@ -463,13 +454,6 @@ review authoring material outside the game loop; its default provider is
   systemd, Telnet TLS, environment variables, story sessions, metrics, backup,
   migration, update/rollback and emergency administrator recovery. Reference
   files: [`deploy/`](deploy/).
-- **[mud.example.org kit](docs/operations/example-deploy.md)** —
-  a host-specific Apache/hosting-panel install/update/uninstall kit
-  ([`deploy/example/`](deploy/example/)) with PostgreSQL 18,
-  Let's Encrypt for both HTTPS and Telnet TLS (port 4100) and a pre-update
-  `pg_dump`. It was executed on 2026-10-16; see the
-  [first-install log](docs/project/log/2026-10-16-example-first-install.md)
-  for what was checked and what is still missing.
 - `/health/live` and `/health/ready` report health; `/metrics` serves
   Prometheus on loopback only.
 - [Releases](docs/operations/releases.md) and [soak testing](docs/operations/soak-testing.md)
@@ -500,8 +484,7 @@ and review the diff.
 
 What the evidence does and does not show:
 
-- The latest local gate recorded in the [matrix](docs/project/COMPLETION_MATRIX.md)
-  (story language picker, 2026-10-16): 1,194 Rust workspace tests passed
+- The latest recorded local gate (story language picker, 2026-10-16): 1,194 Rust workspace tests passed
   (1 ignored), strict clippy and fmt, 306 Vitest tests, svelte-check 0/0 and
   76/76 Playwright runs on Chromium and Firefox. This is **local** evidence.
 - **Hosted CI is currently blocked** before job steps by GitHub billing or
@@ -525,7 +508,7 @@ What the evidence does and does not show:
 | Narrative runtime S0–S7 (formats, tools, sessions, slots, parser, Lua, multiplayer) | Partial |
 | WCAG 2.2 AA browser matrix, 24-hour soak, reproducible release | Partial |
 
-Next steps, from the matrix:
+Next steps:
 
 - close 6D acceptance (PostgreSQL smoke, end-to-end restart, bounded operator
   surface, memory measurements) before any memory budget or LRU;
@@ -564,8 +547,8 @@ crates/tiamud-admin/       operator integrity and recovery
 tools/envy-import/         offline historical area importer
 worlds/                    reviewed Lantern Square WorldPack and area modules
 scripts/                   smoke, load, soak, bots and license checks
-deploy/                    Caddy, systemd and env examples; example/ host kit
-docs/                      protocol, decisions, authoring, operations and status
+deploy/                    Caddy, systemd and env examples
+docs/                      protocol, decisions, authoring, design and operations
 ```
 
 ## Documentation
@@ -574,18 +557,18 @@ The full index is [docs/README.md](docs/README.md).
 
 | Topic | Entry points |
 | --- | --- |
-| Status | [Completion matrix](docs/project/COMPLETION_MATRIX.md) · [project memory](docs/project/PROJECT_MEMORY.md) · [dated logs](docs/project/log/README.md) |
+| Status | [Status and roadmap](#status-and-roadmap) |
 | Decisions | [ADR index](docs/decisions/README.md) (0001–0035) |
 | Stories | [StoryPack guide](docs/authoring/story-packs.md) · [parser guide](docs/authoring/story-parser.md) |
 | Worlds | [Authoring guide](docs/authoring/README.md) · [areas and catalogs](docs/world-authoring.md) · [workflow](docs/authoring/workflow.md) |
 | Protocol | [`tiamud.v1`](docs/protocol/tiamud-v1.md) (experimental) |
-| Operations | [Single host](docs/operations/single-host.md) · [example kit](docs/operations/example-deploy.md) · [releases](docs/operations/releases.md) · [soak](docs/operations/soak-testing.md) |
+| Operations | [Single host](docs/operations/single-host.md) · [releases](docs/operations/releases.md) · [soak](docs/operations/soak-testing.md) |
 | Design | [Character progression v3](docs/design/character-progression-v3.md) · [scene compositor](docs/design/scene-compositor-v1.md) · [social, staff and loot roadmap](docs/design/social-staff-and-loot-roadmap.md) |
 | Specification | [v0.3](docs/spec-v0.3.md) (current baseline) · [v0.2, Spanish, historical](docs/archive/spec-v0.2.md) |
 | Security | [SECURITY.md](SECURITY.md) |
 
-Internal governance documents (`AGENTS.md`, `CLAUDE.md`, the project memory,
-matrix, ADRs and dated logs) are maintained in Spanish; public-facing guides
+Internal governance documents (`AGENTS.md`, `CLAUDE.md` and the ADRs) are
+maintained in Spanish; public-facing guides
 are in English.
 
 ## Contributing
@@ -601,12 +584,12 @@ bounded input, honest status) and the required checks.
   protocol changes need Rust, strict TypeScript, Playwright and Telnet/GMCP
   parity.
 - Changes to accepted architecture need an [ADR](docs/decisions/README.md)
-  first; material changes update the matrix, the project memory and a dated log.
+  first; material changes keep tests and public documentation factual.
 - Do not submit historical code, areas, help or media without clear
   redistribution rights. Compatibility does not imply a license.
 
-Material AI assistance in development is declared in the project logs; model
-output is reviewed and passes the same gates. No AI is needed to build, run or
+Material AI assistance in development is declared in the project's records;
+model output is reviewed and passes the same gates. No AI is needed to build, run or
 play Tiamud.
 
 ## License

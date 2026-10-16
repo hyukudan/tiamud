@@ -2,8 +2,7 @@
 
 - Estado: aceptada — implementación parcial. El modelo de núcleo (StoryPack v2 en `crates/story-core`
   y su soporte offline en `crates/story-tools`) está implementado como
-  biblioteca; no existe protocolo, actor de servidor ni interfaz. Ver
-  [`COMPLETION_MATRIX.md`](../project/COMPLETION_MATRIX.md).
+  biblioteca; no existe protocolo, actor de servidor ni interfaz.
   2026-10-16: aceptado por el propietario.
 - Fecha: 2026-10-15
 - Alcance: fase S4 de [ADR 0025](0025-narrative-ruleset-story-core.md)
@@ -172,8 +171,7 @@ con variantes AVIF/WebP/JPEG, licencia y procedencia, más texto alternativo
 localizado) y envía `scene.background` y `portrait.image` como
 `{manifest, alt}`; un id sin entrada no produce imagen y el texto conserva
 todo lo jugable. El navegador muestra fondo y retratos solo con multimedia
-permitida y cae al texto alternativo; Telnet imprime el alt del fondo. Ver el
-[registro](../project/log/2026-10-15-story-presentation-locale-compat.md).
+permitida y cae al texto alternativo; Telnet imprime el alt del fondo.
 
 ## Nota de estado (2026-10-16): retratos en las líneas de diálogo
 
@@ -184,5 +182,4 @@ mismo mapa revisado `story-media.json` y envía `block.portrait {manifest,
 alt}` (alt en el locale de la sesión) solo en una línea con `speaker`. Una
 expresión sin entrada en el mapa no produce imagen. El navegador la muestra
 junto a la línea solo con multimedia permitida y Telnet conserva
-`Nombre: «texto»` sin repetir el alt. Ver el
-[registro](../project/log/2026-10-16-story-language-picker-and-dialogue-portraits.md).
+`Nombre: «texto»` sin repetir el alt.

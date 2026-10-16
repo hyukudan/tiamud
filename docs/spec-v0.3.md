@@ -47,8 +47,7 @@ relabeled as v14. The server covers the real board/runtime flow and advisory
 concurrency. The current v14 acceptance passes 20/20 adapter tests and 7/7
 focused server tests, including the generation CAS; its smoke binds G0 and
 validates `noop`, readiness, Web, Telnet and two resident areas. That evidence is
-schema v14 and is not relabeled as v15. See the
-[PostgreSQL v14/PWA log](project/log/2026-07-17-postgresql-v14-and-pwa-acceptance.md).
+schema v14 and is not relabeled as v15.
 Schema v16 only adds the `story_saves` table for persisted story save slots
 ([ADR 0030](decisions/0030-story-save-slots-and-schema-v16.md), accepted),
 used by story sessions for manual slots and the autosave
@@ -230,8 +229,8 @@ publishing, and startup validates both before readiness.
 
 6D remains `Partial`: it lacks an operational surface, budget/LRU, hysteresis, a
 specific lost-ACK E2E and RSS measurement.
-The exact test counts and per-phase status are the single authority of
-[`docs/project/COMPLETION_MATRIX.md`](project/COMPLETION_MATRIX.md); the retained
+The exact test counts and per-phase status are kept in the project's private
+completion records; the retained
 local evidence is not CI, release or production evidence.
 Still out of scope are revision replacement, players during
 retirement, migrations, GC, networking, compression and remote signing. The
@@ -850,9 +849,7 @@ P1/P2/P3. WebKit, a manual reader, mixed load/soak or a 24h soak were not run.
 
 Phase 5E passes 695 Rust tests, 123 Vitest, 46/46 supported Playwright, 88
 Node, format, clippy, build, smoke and supply chain; the audit leaves 0
-P1/P2/P3 open. The
-[5E log](project/log/2026-07-17-bounded-spatial-voice-phase-5e.md) retains
-the executed evidence and the uncovered gates.
+P1/P2/P3 open.
 
 An isolated piece is not an end-to-end feature. Update documentation
 when the integration gates change.

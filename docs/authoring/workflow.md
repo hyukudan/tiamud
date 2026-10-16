@@ -100,5 +100,4 @@ v1–v5 allow 1 MiB; v6–v8, 2 MiB. There is no other loot, inventory, or trade
 authority and no double writes. The 6C gate passes 774 Rust tests —329 of them
 server— and the re-audit 0 P1/0 P2. Disposable PostgreSQL 18 passes 20/20
 adapter tests and 7/7 focused server tests, including the v14 CAS; the smoke test
-binds G0 and validates `noop`, readiness, Web, Telnet, and clean shutdown. See
-the [PostgreSQL v14/PWA acceptance log](../project/log/2026-07-17-postgresql-v14-and-pwa-acceptance.md).
+binds G0 and validates `noop`, readiness, Web, Telnet, and clean shutdown.

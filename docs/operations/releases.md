@@ -85,8 +85,7 @@ La puerta funcional 6C está cerrada. PostgreSQL 18 desechable pasa 20/20 prueba
 del adaptador y 7/7 enfocadas del servidor, incluida la CAS v14; el humo real
 liga G0 secuencia 1 y valida readiness, Web, Telnet, dos áreas residentes,
 SIGHUP `noop` y cierre limpio. Esta aceptación local y una futura atestación
-remota siguen siendo pruebas distintas. Véase el
-[registro de aceptación PostgreSQL v14/PWA](../project/log/2026-07-17-postgresql-v14-and-pwa-acceptance.md).
+remota siguen siendo pruebas distintas.
 
 El candidato v15 debe conservar y verificar `world_area_checkpoints` en backup,
 restore y traslado. La aceptación v14 anterior no acredita esa tabla. El
@@ -103,8 +102,7 @@ la migración v16→v17 debe probarse sobre una copia verificada, backup y
 restore deben conservar juntas `world_runtime` y `world_runtime_sections`, el
 traslado debe verificar el ensamblado y copiar las filas byte a byte, y un
 rollback del binario a v16 exige restaurar la copia previa. Las suites
-automatizadas PostgreSQL v17 pasan en local
-([registro](../project/log/2026-10-16-postgresql-local-evidence.md)), pero
+automatizadas PostgreSQL v17 pasan en local, pero
 ninguna aceptación integral PostgreSQL acredita v17. 6D sigue
 parcial: no hay LRU ni superficie de operador, y un release no debe anunciar
 descarga automática o ahorro RSS hasta que exista evidencia integral retenida.

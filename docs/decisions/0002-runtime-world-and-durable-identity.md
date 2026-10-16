@@ -34,4 +34,4 @@ The authenticated exploration alpha completed the transition recorded here:
 - The actor rejects a second live connection to the same character. Disconnect releases that lease, and reconnect returns a fresh authoritative snapshot.
 - Character position and complete per-character item locations persist through take/drop actions, reconnects, and restarts.
 
-The temporary unauthenticated transport entry described by this ADR is no longer the current behavior. See the [authenticated exploration alpha log](../project/log/2026-07-15-authenticated-exploration-alpha.md). The broader engine remains incomplete; the [completion matrix](../project/COMPLETION_MATRIX.md) records the active gaps without changing this accepted decision.
+The temporary unauthenticated transport entry described by this ADR is no longer the current behavior. The broader engine remains incomplete; the project's private completion records track the active gaps without changing this accepted decision.

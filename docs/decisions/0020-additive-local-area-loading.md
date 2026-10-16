@@ -366,9 +366,6 @@ solicitada no vuelve no-ready por sí solo al proceso.
 - Los adaptadores de persistencia conservan snapshot v7 y esquema v13; solo se
   reutiliza su commit atómico cuando el lote crea estado dinámico.
 
-La evidencia integrada y sus límites se conservan en el
-[registro de fase 6B](../project/log/2026-07-17-additive-local-area-loading-phase-6b.md).
-
 ## Aceptación
 
 La aceptación de 6B exige pruebas enfocadas e integradas que demuestren, como

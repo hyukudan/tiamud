@@ -43,5 +43,5 @@ overwrite an existing file. The complete one-host procedure, including the
 reviewed Tiamud systemd and Caddy examples, lives in the
 [single-host runbook](../../docs/operations/single-host.md). Remaining
 operational gaps such as DB-aware readiness, metrics, Telnet TLS, and retained
-load/soak evidence are recorded honestly in the
-[completion matrix](../../docs/project/COMPLETION_MATRIX.md).
+load/soak evidence are recorded honestly in the project's private completion
+records.

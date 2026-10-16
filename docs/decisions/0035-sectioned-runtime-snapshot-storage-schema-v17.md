@@ -183,6 +183,4 @@ del fsync domina y el marginal de la sección de ~0,82 MB es ~4–6 ms p50.
 **Decisión: no se parte `itemInstances`;** el esquema sigue en v17 (los
 cubos requerirían ampliar el `CHECK` cerrado de secciones, es decir, un
 esquema nuevo). Las pruebas PostgreSQL v17 ya se ejecutaron en local el mismo
-día. Ver el
-[registro](../project/log/2026-10-16-item-instances-bucketing-measurement.md);
-es evidencia local y diagnóstica, no de CI ni de producción.
+día; es evidencia local y diagnóstica, no de CI ni de producción.
