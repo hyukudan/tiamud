@@ -3,93 +3,92 @@
 </h1>
 
 <p align="center">
-  <a href="https://github.com/hyukudan/tiamud/actions/workflows/ci.yml"><img src="https://github.com/hyukudan/tiamud/actions/workflows/ci.yml/badge.svg" alt="Continuous integration"></a>
+  <strong>One Rust engine for persistent MUDs and narrative games — fully playable as text, in the browser and over Telnet.</strong>
+</p>
+
+<p align="center">
   <a href="#license"><img src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg" alt="License: MIT OR Apache-2.0"></a>
-  <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/MSRV-Rust%201.88-b7410e.svg" alt="MSRV: Rust 1.88"></a>
+  <a href="LICENSE-CONTENT.md"><img src="https://img.shields.io/badge/content-CC%20BY%204.0-lightgrey.svg" alt="Content: CC BY 4.0"></a>
+  <a href="Cargo.toml"><img src="https://img.shields.io/badge/rust--version-1.88-b7410e.svg" alt="Declared rust-version: 1.88"></a>
+  <a href="docs/project/COMPLETION_MATRIX.md"><img src="https://img.shields.io/badge/status-pre--release%200.1.0-orange.svg" alt="Status: pre-release 0.1.0"></a>
+</p>
+
+<p align="center">
+  <a href="https://mud.example.org"><strong>Play in the browser</strong></a> ·
+  <code>mud.example.org:4100</code> (Telnet over TLS) ·
+  <a href="#quick-start">Run it locally</a> ·
+  <a href="docs/authoring/story-packs.md">Write a story</a> ·
+  <a href="docs/project/COMPLETION_MATRIX.md">Status</a>
 </p>
 
 ![Panoramic painterly view of Tiamud's medieval crossroads at dusk, rain reflected on the road, a blue lantern and several routes toward a distant city.](docs/images/tiamud-hero.webp)
 
-**A browser-first multiplayer narrative engine that is fully playable as text.**
+Tiamud is a single-process Rust server that runs two kinds of game on the same
+accounts, transports and persistence:
 
-Tiamud is a pre-release Rust engine for building persistent multiplayer worlds.
-It is inspired by EnvyMUD, Merc and the classic MUD tradition, but it is a new
-implementation. The official web client adds atmospheric artwork, audio and
-accessible controls; every fact and every playable action stays available
-through prose and structured state. A plain Telnet client remains a
-first-class way to play.
+- **A persistent multiplayer MUD** in the EnvyMUD/Merc tradition — a new
+  implementation, not a fork — with rooms, NPCs, combat, v3 characters,
+  durable item instances, trade, group loot, quests, shops and social systems.
+- **Narrative games** authored as StoryPacks:
+  - **choose-your-own-adventure gamebooks** with stats, dice and items;
+  - **menu-driven adventures** in the style of *Snatcher* and the Spanish
+    adventures of the 1980s — verb menus, hotspots, character portraits and
+    dialogue trees;
+  - **parser interactive fiction** (*aventuras conversacionales*) with a
+    Spanish and English command parser, rooms, objects, doors and light;
+  - optional **multiplayer** for any story: shared instances with seats,
+    spectators, majority votes or turns;
+  - music and sound-effect cues and background/portrait images published through
+    the reviewed media pipeline, which
+    are always optional: losing media never changes play.
 
-The project is designed for a **single machine** first. One process serves the
-world, the browser and Telnet on an ordinary host. PostgreSQL is the
-recommended profile for a fresh public install; SQLite is the implemented,
-zero-configuration path for development, local play and compatibility. Each
-server opens exactly one persistence system and never writes to both. The
-baseline needs no Kubernetes, Redis, object storage or AI.
+Every fact and every action is available as text. The Svelte web client adds
+artwork, audio and accessible controls; a plain Telnet client is a first-class
+way to play, with TLS by default and optional ANSI colour, GMCP and terminal graphics.
 
-> Tiamud is under active development. Automated coverage is broad, but there is
-> still no public production deployment and no stable protocol version. The
-> [completion matrix](docs/project/COMPLETION_MATRIX.md) distinguishes
-> implementation, retained evidence and pending acceptance.
+> [!NOTE]
+> **Public instance.** <https://mud.example.org> (web) and
+> `mud.example.org:4100` (Telnet over TLS) were installed on 2026-10-16
+> on a single host with PostgreSQL ([install log](docs/project/log/2026-10-16-example-first-install.md)).
+> It is a fresh public installation, not evidence of production use at scale:
+> no soak, load test, CI run or scheduled database backup is recorded for it.
+
+> [!IMPORTANT]
+> Tiamud is **pre-release** (`0.1.0`) and the `tiamud.v1` protocol is still
+> experimental. Many narrative and content features are deliberately
+> **Partial**. The [completion matrix](docs/project/COMPLETION_MATRIX.md) is the
+> single authority for what is complete, partial and pending.
 
 ## Contents
 
-- [What works today](#what-works-today)
+- [Highlights](#highlights)
 - [Architecture](#architecture)
+- [The MUD engine](#the-mud-engine)
+- [The narrative runtime](#the-narrative-runtime)
+- [Clients](#clients)
+- [Protocol](#protocol)
+- [Persistence and performance](#persistence-and-performance)
 - [Quick start](#quick-start)
-- [Single-machine deployment](#single-machine-deployment)
-- [Characters, classes and progression](#characters-classes-and-progression)
-- [Social, staff and inventory systems](#social-staff-and-inventory-systems)
-- [Scenes and media](#scenes-and-media)
-- [Authoring: WorldPack and AreaPack](#authoring-worldpack-and-areapack)
-- [Accessibility and security](#accessibility-and-security)
-- [Optional AI](#optional-ai)
-- [Verification](#verification)
+- [Authoring a story](#authoring-a-story)
+- [Authoring a world](#authoring-a-world)
+- [Deployment](#deployment)
+- [Verification and evidence](#verification-and-evidence)
 - [Status and roadmap](#status-and-roadmap)
 - [Repository map](#repository-map)
 - [Documentation](#documentation)
 - [Contributing](#contributing)
 - [License](#license)
 
-## What works today
+## Highlights
 
-- **Persistent world:** accounts, characters, rooms, objects, NPCs, equipment,
-  combat, quests, parties, economy, logical time and weather. Objects separate
-  reusable prototypes from durable instances, with slot/weight capacity, derived
-  fungible stacks, bounded containers, fixed and repeatable loot, `give`,
-  transfer policies and confirmed bilateral trade.
-- **Data-defined characters:** the v3 model captures lineages, optional
-  background, base and advanced classes, a global XP curve, ranked talents and
-  atomic promotions. Attributes, resources, resistances, cooldowns and states
-  are all bounded.
-- **Groups and conversation:** local `say`, online `tell`/`reply`, authored
-  direct telepathy as an ability, world-defined room emotes, bounded group chat
-  and lifecycle, `general`/`newbie`/`staff` channels, private offline mail and
-  public `general`/`newbie` boards. Spatial voice `yell`/`shout` (phase 5E) uses
-  a directed, bounded radius without revealing world topology.
-- **Capability-based staff:** five operational profiles, twelve closed
-  capabilities, a report queue/resolution flow, diagnostic/repair actions and an
-  append-only audit. Neither narrative title, XP, class, WorldPack nor the legacy
-  role authorizes commands.
-- **One authoritative path:** browser and Telnet produce the same
-  `PlayerAction`, pass through the same rules and mutate a single world actor.
-- **Web and terminal clients:** Svelte 5 installable as a PWA; plain/ANSI
-  Telnet; optional GMCP, MSSP, MCCP2, MXP/MSLP; TinTin++ and Mudlet integrations.
-- **Safe media:** optional scene image and audio, immutable content-addressed
-  assets, alternative text and preferences for media, motion, contrast and
-  screen readers.
-- **Modular authoring:** AreaPack v9 splits a world into areas; the offline
-  composition of WorldProject v2 produces a canonical WorldPack v10, which also
-  declares quests, commodities and shops as data. Phases 6A–6C
-  add verifiable catalogs/bundles, catalog boot with additive on-demand loading,
-  and quiescent replacement of a whole generation. Phase 6D, **partial**, adds
-  reversible retirement of same-generation SCC units with a durable checkpoint;
-  an RSS budget, LRU and an operator surface are still missing.
-- **Single-host operation:** PostgreSQL/SQLite adapters, Argon2id credentials,
-  revocable sessions, bounded queues, health, Prometheus metrics, graceful
-  shutdown and an explicit move to PostgreSQL.
-
-Per-phase status and exact figures live in the
-[completion matrix](docs/project/COMPLETION_MATRIX.md).
+| | |
+| --- | --- |
+| **One authoritative path** | Browser and Telnet both parse to the same `PlayerAction` and mutate one single-writer world actor. No transport has a shortcut around the rules. |
+| **Text first, media optional** | Images, music and sound are presentation only. Reader mode, Save-Data and "media off" download nothing and lose no information. |
+| **Two game models, one server** | MUD worlds (WorldPack v10) and narrative StoryPacks (formats v1–v3) share accounts, transports and the storage backend, but never game state. |
+| **Bounded everything** | Queues, frames (16 KiB), scripts, parser input, save slots, votes and media maps all have explicit limits and fail closed. |
+| **Single host, one backend** | One process serves web, WebSocket and Telnet. SQLite for zero-config local play, PostgreSQL for a public install — exactly one per server. No Kubernetes, Redis or AI required. |
+| **Honest status** | Phases are marked `Complete` or `Partial` with their evidence; local evidence is never presented as CI, release or production evidence. |
 
 ![Authenticated Tiamud session at Lantern Square with atmospheric artwork, full prose, exits, objects, character state and command history.](docs/images/tiamud-gameplay.webp)
 
@@ -97,201 +96,334 @@ Per-phase status and exact figures live in the
 
 ```mermaid
 flowchart LR
-    accTitle: Tiamud shared action architecture
-    accDescr: Browser and terminal share an authorized domain path, per-observer projection and a single selected persistence system.
+    accTitle: Tiamud architecture
+    accDescr: Browser and Telnet clients reach one server process; MUD actions go to a single-writer world actor, story inputs to per-instance story tasks; both persist to exactly one backend.
 
-    Browser[Browser<br/>HTTP + WebSocket] --> Web[Web adapter]
-    Telnet[Telnet<br/>text or rich] --> TN[Telnet adapter]
-    Web --> Action[PlayerAction]
-    TN --> Action
-    Action --> Actor[World actor<br/>single writer]
-    Actor --> Projection[Perception +<br/>observer projection]
-    Projection --> Web
-    Projection --> TN
-    Actor <--> Store[(PostgreSQL<br/>or SQLite)]
-    Pack[Reviewed WorldPack<br/>or durable local generation] --> Actor
+    subgraph Clients
+        Web["Svelte web client<br/>apps/web"]
+        Tel["Telnet client<br/>plain · TLS · GMCP"]
+    end
+
+    subgraph Server["tiamud-server (one process)"]
+        WA["Web adapter<br/>HTTP + WebSocket"]
+        TA["Telnet adapter<br/>telnet-codec · cell-frame"]
+        Proto["protocol<br/>typed tiamud.v1"]
+        Actor["World actor<br/>single writer · mud-core"]
+        Story["Story sessions<br/>one task per instance"]
+        SC["story-core<br/>+ story-parser"]
+        Lua["story-script / scripting<br/>sandboxed Lua"]
+    end
+
+    WP[("WorldPack v10<br/>world-pack")]
+    SP[("StoryPacks v1–v3<br/>TIAMUD_STORY_DIR")]
+    DB[("SQLite or PostgreSQL<br/>schema v17")]
+
+    Web --> WA
+    Tel --> TA
+    WA --> Proto
+    WA --> Actor
+    TA --> Actor
+    WA --> Story
+    TA --> Story
+    Actor --> SC2{{"perception +<br/>per-observer projection"}}
+    SC2 --> WA
+    SC2 --> TA
+    Story --> SC
+    SC -. optional .-> Lua
+    WP --> Actor
+    SP --> Story
+    Actor <--> DB
+    Story <-->|save slots| DB
 ```
 
-Four boundaries keep the engine flexible:
+Four rules hold the design together:
 
 1. **Transports parse; the domain decides.** A structured browser action is not
    a shortcut around the rules.
 2. **One writer owns the world.** Bounded queues and durable checkpoints order
    state; if persistence fails, the previous in-memory state is restored
    exactly.
-3. **Perception precedes protocol.** Hidden variants and stable IDs never leave
-   the server. Each session receives opaque IDs and only authorized facts.
-4. **Presentation is replaceable.** Text, terminal color, images, audio and
-   visual composition all represent the same semantic state.
+3. **Perception precedes protocol.** Hidden variants and durable IDs never leave
+   the server; each session sees opaque, per-session IDs and only authorized
+   facts. Story choices use random per-view tokens.
+4. **Presentation is replaceable.** Text, terminal colour, images, audio and
+   visual composition all render the same semantic state.
 
-The experimental browser contract is documented in
-[`tiamud.v1`](docs/protocol/tiamud-v1.md). On a sequence gap the client requests
-an authoritative snapshot; it never invents state or blindly replays actions.
+## The MUD engine
+
+| Area | What exists | Status |
+| --- | --- | --- |
+| World actor | Single-writer actor, bounded input/output/persistence queues, prioritized output and a slow-client policy, observer-specific projection | Complete |
+| Characters v3 | Lineages, optional background, base and advanced classes, one global XP curve, ranked talents and atomic promotions ([design](docs/design/character-progression-v3.md)) | Complete |
+| Inventory 3A–3D | Item prototypes and durable instances, slot/weight capacity, derived stacks, containers (depth 4), transfer policies, `give` and confirmed bilateral `trade` | Complete |
+| Loot and rewards 4A–4B | Fixed and repeatable loot with rights and provenance, party round-robin and `loot pass`, earned sealed rewards and deterministic affixes | Complete |
+| Group loot 4C | Need/greed and master-loot for fixed loot ([ADR 0023](docs/decisions/0023-need-greed-and-master-loot-distribution.md)) | Partial |
+| Social 1–5E | `say`, `tell`/`reply`, authored telepathy and room emotes, channels, parties of six, offline mail, moderated boards, spatial `yell`/`shout` | Complete |
+| Staff | Five profiles, twelve closed capabilities, report queue, inspect/where/goto/transfer/restore/announce and an append-only audit | Complete |
+| Areas 6A–6D | Verifiable area catalogs and bundles (6A), additive on-demand loading (6B), quiescent whole-generation cutover (6C); reversible unit retirement (6D) is **partial** — no memory budget, LRU or operator surface yet | 6A–6C Complete, 6D Partial |
+| Quests and shops as data | WorldPack v10/AreaPack v9 `commodities`, staged `quests` and `shops` with restock ([ADR 0032](docs/decisions/0032-worldpack-v10-quests-and-shops.md)); `talk <npc>` in Web and Telnet | Partial |
+| Lua hooks | Fresh sandboxed VM per call with quotas on code, memory, instructions, time and events; no filesystem, network or process access | Complete |
+| Time and RNG | Logical ticks, weather, respawns, timers and seeded deterministic RNG | Complete |
+
+Representative commands (Web and Telnet share them):
+
+```text
+look / examine <target>       north / east / south / west
+inventory                     take / drop / put / get [quantity] <item>
+equip / unequip <target>      give [quantity] <item> to <character>
+loot / loot pass              trade request / offer / confirm <...>
+attack <target>               ability / cast <id> [target]
+promote <class-id>            talent learn <graph-id> <node-id>
+quest ...   talk <npc>        balance / shop / buy ...
+say / tell / reply            yell / shout <message>
+party create / invite / accept / say
+mail send <character> | <subject> | <body>
+board post <board> | <subject> | <body>
+historias / stories           historia <id> [locale] / story <id> [locale]
+```
+
+The full command surface is in the [operations guide](docs/operations/single-host.md)
+and the [authoring guide](docs/authoring/README.md).
+
+## The narrative runtime
+
+The narrative ruleset ([ADR 0025](docs/decisions/0025-narrative-ruleset-story-core.md))
+is separate from the MUD: a story never reads or writes world state. All of it
+is **Partial** in the matrix — implemented as working slices with local
+evidence, not yet accepted end to end.
+
+### StoryPack formats
+
+| Format | Adds | ADR |
+| --- | --- | --- |
+| **v1** — gamebook | Nodes and choices, bounded int/bool variables, items, a closed condition and effect language (`set`, `add`, `give`, `take`, `goto`, `roll`, `if`, `cue`, `score`, `end`), seeded dice, endings | [0025](docs/decisions/0025-narrative-ruleset-story-core.md) |
+| **v2** — menu adventure | Verbs with targets, hotspots, characters with expression portraits, per-node backgrounds, menu responses, flat dialogue trees | [0028](docs/decisions/0028-story-menus-portraits-and-dialogue-trees.md) |
+| **v3** — parser IF | A `world` with rooms and exits, doors, darkness, up to 128 objects, `before`/`instead`/`after` rules, a default action library, 1–4 lexicons, `compatible_revisions`, optional Lua `scripts` | [0031](docs/decisions/0031-parser-interactive-fiction-storypack-v3.md), [0034](docs/decisions/0034-lua-scripts-in-storypacks.md) |
+
+Each format is a strict superset of the previous one, and `tiamud-story fmt
+--upgrade` lifts a pack to v3. JSON Schemas are published for
+[v1](crates/story-tools/schema/story-pack.v1.schema.json),
+[v2](crates/story-tools/schema/story-pack.v2.schema.json) and
+[v3](crates/story-tools/schema/story-pack.v3.schema.json).
+
+### Building blocks
+
+| Crate | Role |
+| --- | --- |
+| [`story-core`](crates/story-core) | Pure, I/O-free ruleset: load, validate, `step`/`view`, undo ring, paginated views |
+| [`story-parser`](crates/story-parser) | Regex-free Spanish/English command parser: enclitics (`cógela`), contractions, `todo`/`excepto`, ambiguity questions, up to 4 commands per line ([guide](docs/authoring/story-parser.md)) |
+| [`story-script`](crates/story-script) | Optional Lua host: scripts declare grants, emit checked intents and run under memory/instruction/time budgets |
+| [`story-tools`](crates/story-tools) | `tiamud-story` CLI: `validate`, `preview`, `test`, `play`, `fmt`, `schema` |
+
+### On the server
+
+- **Sessions** ([ADR 0029](docs/decisions/0029-story-session-instances-and-story-protocol.md)):
+  enabled with `TIAMUD_STORY_DIR`; one single-writer task per instance, idle
+  eviction and global caps. Enter with `historia <id>` / `story <id>`.
+- **Save slots and autosave** ([ADR 0030](docs/decisions/0030-story-save-slots-and-schema-v16.md)):
+  slots 1–9 plus autosave slot 0 (on leave, idle eviction and graceful
+  shutdown), verified against the exact pack SHA-256 or a declared compatible
+  revision.
+- **Locale per session**: `historia <id> en` or the browser's **Stories**
+  picker chooses among the pack's languages; the server's own story text
+  follows it (Spanish or English).
+- **Shared instances** ([ADR 0033](docs/decisions/0033-shared-story-instances-and-voting.md)):
+  share or host a story, join with an 8-character code or invitation, up to 8
+  seats and 32 spectators, host / majority-vote / round-robin-turn modes.
+  Free-text parser commands are never put to a vote.
+- **Lua** only with `TIAMUD_STORY_SCRIPTS=1`; a failing script leaves the game
+  unchanged and shows players a generic error.
+
+### Sample stories
+
+All four are original, reviewed and in Spanish; *Lluvia de neón* is also in
+English.
+
+| Story | Format | Pitch |
+| --- | --- | --- |
+| [La cripta del nigromante](crates/story-core/fixtures/cripta-del-nigromante.story.json) | v1 gamebook | Roll your skill, fight a skeleton with dice and find the key to the necromancer's treasure — or escape without it. |
+| [Lluvia de neón](crates/story-core/fixtures/lluvia-de-neon.story.json) | v2 menu adventure | Rain-soaked noir: a memory dealer turned up dead, and Lola and Dámaso — with portraits and dialogue trees — know more than they say. Ships with sample art. |
+| [El faro de Punta Gris](crates/story-core/fixtures/parser/faro-de-punta-gris.story.json) | v3 parser IF | Washed ashore in a storm, you must relight the dark lighthouse before the boats out at sea need it. |
+| [Duelo en el paso](crates/story-script/fixtures/duelo-en-el-paso.story.json) | v3 + Lua | A bandit blocks the mountain pass; a Lua-scripted combat round decides the duel. |
+
+## Clients
+
+### Web (Svelte 5, [`apps/web`](apps/web))
+
+- Installable PWA with a bounded Service Worker that never caches API,
+  WebSocket or media.
+- Accessibility: semantic regions, narrative log, selective announcements,
+  keyboard operation, explicit screen-reader mode, forced colours and
+  persistent preferences for font size, contrast, motion and media.
+- Resilience: reconnection with jittered backoff, wake-up on `online` and
+  visibility, sequence-gap detection and atomic snapshot recovery.
+- Audio: off by default, unlocked by a user gesture, three volumes, 600 ms
+  crossfade for music and ambience (instant with reduced motion).
+- Mobile: command form kept above the on-screen keyboard and touch targets of
+  at least 44×44 CSS px.
+- Lazy-loaded player dashboard, fetched after first paint or on world entry.
+- Stories: `StoryPanel` (choices, verbs, dialogue, parser command field with
+  history), `StoryPicker` (language choice) and `StoryLobby` (seats, votes,
+  invitations).
+
+### Telnet
+
+- Direct TLS (Rustls, default) or explicit local `plaintext` mode.
+- Plain text always works; ANSI 16/256/truecolour, MCCP2, MSSP, opt-in MXP/MSLP
+  links.
+- Consent-gated cell-frame graphics: ANSI, Kitty, iTerm2 and Sixel
+  (terminal type alone never enables them).
+- GMCP: Core, Room, Char.Vitals/Items, `Char.Trade`, `Char.Reward`,
+  `Tiamud.Character`, `Tiamud.Mail`, `Tiamud.Board`, Comm, Group, Client.Media,
+  Tiamud.Scene/Assets/CellFrame/Client and `Tiamud.Story` (with Lobby, Tally and
+  Invitation).
+- [TinTin++ and Mudlet](clients/) integrations.
+
+## Protocol
+
+The browser speaks [`tiamud.v1`](docs/protocol/tiamud-v1.md) over WebSocket
+(experimental). Since ADR [0026](docs/decisions/0026-typed-protocol-source-and-typescript-codegen.md),
+[`crates/protocol`](crates/protocol) types the envelope and the payloads, and
+the server builds every WebSocket message from those types. TypeScript is
+generated into `apps/web/src/lib/generated/` and `cargo test --workspace`
+fails if it is stale. Golden tests pin the wire bytes. The HTTP account API is
+still hand-written JSON, so this item is **Partial**.
+
+## Persistence and performance
+
+- **Exactly one backend per server**: SQLite (zero configuration, local play)
+  or PostgreSQL (recommended for a public install), both at **schema v17**,
+  with an explicit offline mover from SQLite to an empty PostgreSQL.
+- **Sectioned runtime storage** ([ADR 0035](docs/decisions/0035-sectioned-runtime-snapshot-storage-schema-v17.md)):
+  the runtime snapshot is stored as a header, a manifest and ten SHA-256-checked
+  sections; a commit rewrites only dirty sections and recovery fails closed on
+  any mismatch.
+- **Dirty-tracked commits** ([ADR 0027](docs/decisions/0027-durable-dirty-tracking-for-tick-commits.md)):
+  copy-on-write checkpoints and an item-location index; a tick with no durable
+  change writes nothing.
+
+Measured on a shared local host with an in-memory store that serializes exactly
+what SQL would write (diagnostic figures, **no SQL I/O timed**, ±30 % run to
+run; not CI or production evidence):
+
+| Scenario | Before | After | Source |
+| --- | --- | --- | --- |
+| Mean tick, 50 characters / 5,524 objects | 696–1,033 ms | 7.3–8.7 ms | [hot-path log](docs/project/log/2026-10-15-hot-path-dirty-tracking-and-indexes.md) |
+| Mean `move`, 50 characters | 432–437 ms | 7.8–11.1 ms | same |
+| Mean tick, 200 characters / 7,024 objects | 3,477–3,539 ms | 28.8–43.7 ms | same |
+| Bytes per `move` commit, 200 characters | 1,229,540 | 2,344 | [schema v17 log](docs/project/log/2026-10-15-sectioned-runtime-snapshot-schema-v17.md) |
+| Bytes per tick, 200 characters | 245,731 | 314 | same |
+
+Limits of those numbers: a commit that moves an item still rewrites the item
+section (about a third saved, not more); latency with the in-memory store did
+not change with sectioning, because actor work — not persistence — dominates;
+and splitting the item section further was measured with real SQL I/O and
+[rejected](docs/project/log/2026-10-16-item-instances-bucketing-measurement.md).
+PostgreSQL v16/v17 tests passed locally on a disposable PostgreSQL 18.6
+([log](docs/project/log/2026-10-16-postgresql-local-evidence.md)), not in CI.
 
 ## Quick start
 
-You need Git, `rustup`, a C/C++ compiler/linker, CMake, Node.js 20.19+ (or
-22.12+) and pnpm 10+. The load and soak tooling requires Node.js 24. Node and
-pnpm are used only to build the client, not as services of the compiled server.
+**Prerequisites:** Git, `rustup` (the toolchain is pinned by the repository), a
+C/C++ compiler and linker, CMake, Node.js 20.19+ or 22.12+ and pnpm 10+. The
+load and soak tools need Node.js 24. Node and pnpm only build the web client;
+the compiled server does not need them.
 
 ```sh
 git clone https://github.com/hyukudan/tiamud.git
 cd tiamud
 pnpm --dir apps/web install --frozen-lockfile
 pnpm --dir apps/web build
-TIAMUD_TELNET_MODE=plaintext cargo run --locked -p tiamud-server
+
+# Local development: SQLite, plaintext Telnet and three sample stories
+TIAMUD_TELNET_MODE=plaintext \
+TIAMUD_STORY_DIR=crates/story-core/fixtures \
+cargo run --locked -p tiamud-server
 ```
 
-Open <http://127.0.0.1:8080> or connect Telnet to `127.0.0.1:4000`. The Rust
-server bundles the web build and the reviewed Lantern Square WorldPack.
+- **Browser:** open <http://127.0.0.1:8080>, register, create a character.
+- **Telnet:** `telnet 127.0.0.1 4000`.
+- **Stories:** type `historias` (or `stories`), then for example
+  `historia cripta-del-nigromante`, `story lluvia-de-neon en` or
+  `historia faro-de-punta-gris`; in the browser use the **Stories** button.
 
-Single-player StoryPack sessions (phase S2, with persisted save slots and an
-autosave from phase S3) are off by default. To try the sample gamebook and menu adventure locally, add
-`TIAMUD_STORY_DIR=crates/story-core/fixtures` to the command above, then type
-`historias` and `historia cripta-del-nigromante` (or `story lluvia-de-neon`,
-which shows the reviewed sample backgrounds and portraits in the browser;
-`historia lluvia-de-neon en` plays it in English) in the browser or Telnet. See
-[ADR 0029](docs/decisions/0029-story-session-instances-and-story-protocol.md)
-and [single-host operation](docs/operations/single-host.md#story-sessions).
+Without `TIAMUD_STORY_DIR` story sessions are off. The bundled
+`crates/story-core/fixtures` directory holds three packs (its `parser/`
+subdirectory is scanned too) plus the reviewed media map. The Lua sample
+lives in `crates/story-script/fixtures`; to try it, point `TIAMUD_STORY_DIR`
+at a directory that also contains `duelo-en-el-paso.story.json` and add
+`TIAMUD_STORY_SCRIPTS=1` — without that switch a scripted pack stops the
+server at startup. See [story sessions](docs/operations/single-host.md#story-sessions)
+for every limit.
 
-> Unencrypted Telnet is a local-development exception. It must not be exposed to
-> the internet: registration and login would travel in the clear. Telnet TLS is
-> the default mode and fails closed without a valid certificate and key.
+> [!WARNING]
+> Plaintext Telnet is a local-development exception: credentials would travel
+> in the clear. TLS is the default Telnet mode and fails closed without a valid
+> certificate and key. Never expose `plaintext` to the internet.
 
-Representative commands:
+## Authoring a story
 
-```text
-look / examine <target>     north / east / south / west
-inventory                   take / drop / put / get [quantity] <item>
-equip / unequip <target>    give [quantity] <item> to <character>
-loot / loot pass            trade request / offer / confirm <...>
-attack <target>             ability / cast <id> [target]
-promote <class-id>          talent learn <graph-id> <node-id>
-quest ...                   party create / invite / accept / say
-say / tell / reply          who / help / ignore / block
-telepathy <ability-id> <character> <message>
-emote <command> [character] channel say <channel> <text>
-yell / shout <message>      balance / shop / buy ...
-staff ...                   mail send <character> | <subject> | <body>
-board post <board> | <subject> | <body>
+A minimal StoryPack (format v1; it validates against the published
+[v1 JSON Schema](crates/story-tools/schema/story-pack.v1.schema.json)):
+
+```json
+{
+  "format_version": 1,
+  "id": "puente-de-cuerda",
+  "title": { "es": "El puente de cuerda", "en": "The Rope Bridge" },
+  "start": "orilla",
+  "items": [{ "id": "cuerda", "name": { "es": "Cuerda", "en": "Rope" } }],
+  "nodes": [
+    {
+      "id": "orilla",
+      "text": { "es": "Un puente roto cruza el barranco.", "en": "A broken bridge spans the gorge." },
+      "choices": [
+        { "id": "coger", "label": { "es": "Coger la cuerda", "en": "Take the rope" },
+          "effects": [{ "give": "cuerda" }] },
+        { "id": "cruzar", "label": { "es": "Cruzar", "en": "Cross" },
+          "when": { "has_item": "cuerda" }, "effects": [{ "score": 10 }], "target": "otro-lado" }
+      ]
+    },
+    { "id": "otro-lado", "text": { "es": "Llegas al otro lado.", "en": "You reach the far side." },
+      "ending": { "id": "cruce", "kind": "victory" } }
+  ]
+}
 ```
 
-The full surface of staff, mail and board commands is in the
-[operations guide](docs/operations/single-host.md) and the
-[authoring guide](docs/authoring/README.md).
+Work with packs offline using `tiamud-story`:
 
-## Single-machine deployment
+```sh
+alias tiamud-story='cargo run --locked -q -p tiamud-story-tools --bin tiamud-story --'
 
-| Layer | Local/private | Fresh public profile on one host |
-| --- | --- | --- |
-| Browser | HTTP on loopback | HTTPS/WSS behind Caddy |
-| Terminal | explicit `plaintext` on localhost/trusted LAN | direct Telnet TLS |
-| Persistence | zero-config SQLite | PostgreSQL on the same machine |
-| World | embedded WorldPack or local 6B/6C catalog | reviewed external WorldPack or durable local catalog |
+# Validate and lint (unreachable nodes, impossible choices, soft-locks, ...)
+tiamud-story validate crates/story-core/fixtures/cripta-del-nigromante.story.json --deny-warnings
 
-The [operations guide](docs/operations/single-host.md) covers Caddy, systemd,
-Telnet TLS, environment variables, the SQL schema, backups, monitoring,
-upgrade and rollback, including the 6B→6C migration with recovery/characters.
-Reviewed examples live in [`deploy/`](deploy/).
+# Render a node or a dialogue as a player would see it
+tiamud-story preview crates/story-core/fixtures/lluvia-de-neon.story.json --locale en
 
-If an install loses all administrative authority, the documented offline
-recovery is not limited to the legacy role: `tiamud-admin recover-admin`
-installs an `implementor` with exactly the twelve capabilities and both audits
-in one transaction, refusing if an `administrator`/`implementor` already exists.
-The SQLite procedure and its PostgreSQL equivalent are in the
-[emergency recovery](docs/operations/single-host.md#emergency-implementor-recovery)
-section.
+# Replay a scripted playthrough with a fixed seed and check expectations
+tiamud-story test crates/story-core/fixtures/parser/faro-de-punta-gris.story.json \
+  --script crates/story-tools/tests/fixtures/faro-victoria.script.json
 
-`/health/live` and `/health/ready` expose health. `/metrics` serves Prometheus
-on the same listener, bound to loopback by default; the reference Caddy
-configuration does not publish metrics.
+# Play interactively in the terminal (Lua host included)
+tiamud-story play crates/story-script/fixtures/duelo-en-el-paso.story.json --seed 7
 
-## Characters, classes and progression
+# Canonical formatting, upgrade to v3, and the v3 JSON Schema
+tiamud-story fmt my.story.json --upgrade --output my.v3.story.json
+tiamud-story schema
+```
 
-WorldPack v10 keeps the v3 character model: it composes a character from a
-lineage, optional background and a base class. Accumulated XP governs the global
-level, class grants and separate point reserves. There is one active class and
-an ordered history, not free multiclassing.
+Linter silence is not a proof that every ending is winnable. Read the
+[StoryPack guide](docs/authoring/story-packs.md) and the
+[parser guide](docs/authoring/story-parser.md) for the full format, limits and
+the server's meta commands.
 
-Advanced promotions may require level, attributes, abilities, quests, flags,
-lineage, current or historical class, learned abilities and prior talents. A
-promotion preserves XP/level, updates the active class exactly once and applies
-only validated grants. Talents consume their reserve and respect prerequisites
-and exclusions. Browser and Telnet expose the same catalog; Telnet also receives
-the sheet through the `Tiamud.Character` GMCP package.
-
-There is no general use-based training: permanent growth comes from creation,
-level, talent and promotion grants. Earlier WorldPack/AreaPack versions and
-Envy/Merc enter only through explicit normalization boundaries; `archetype` is
-not a second identity, and published IDs are the content migration boundary.
-
-See the [v3 progression design](docs/design/character-progression-v3.md) and the
-[authoring guide](docs/authoring/README.md).
-
-## Social, staff and inventory systems
-
-Classic terms can hide distinct systems. What is implemented today:
-
-- **Conversation:** local `say`; `yell`/`shout` with a directed, deterministic
-  BFS that excludes secret exits and is bounded to 259 rooms; online
-  `tell`/`reply`; authored direct telepathy with resource/cooldowns; authored
-  room emotes with no free text; `who`, `help`, ignore, block and report; group
-  chat; subscribed channels; separate paginated offline mail with quotas and
-  report evidence; bounded public `general`/`newbie` boards.
-- **Groups:** up to six members; create, invite, accept, revoke, kick,
-  transfer, disband, leave and `party say`. Membership persists offline; targeted
-  operations resolve a connected name. A frozen cohort takes part in round-robin
-  loot distribution.
-- **Staff:** `helper`/`builder`/`moderator`/`administrator`/`implementor`
-  profiles, an optional narrative title, twelve closed capabilities, a report
-  queue/resolution flow, inspect/where/goto/transfer/restore/announce/audit and
-  explicit assignment with a reason and an append-only audit. The legacy
-  `Player`/`Moderator`/`Admin` roles never authorize commands on their own.
-- **Inventory:** prototypes and durable instances; derived stacks; containers
-  with slots, recursive weight and depth four;
-  `transferable`/`character_bound`/`non_transferable` policies; unilateral `give`
-  and confirmed bilateral `trade` with revision, double confirmation and a
-  simultaneous commit; a durable per-instance affix. Web, Telnet and GMCP project
-  policy and opaque IDs, never owners or durable identities.
-- **Loot:** fixed sources, repeatable integer tables, sealed rewards and
-  deterministic affix pools. A defeat confirms provenance and rights for at most
-  64 roots; `party_round_robin`, `loot pass` and the 20/120 deadlines are
-  authoritative. `reward odds`/`open` query and open a seal with a single commit.
-  Need/greed and master-loot are partially implemented for fixed loot
-  (ADR 0023); paid boxes and pity stay out of the baseline.
-
-Details and contracts:
-[ADR 0016 room emotes](docs/decisions/0016-authored-room-emotes.md),
-[ADR 0017 offline mail](docs/decisions/0017-bounded-offline-mail.md),
-[ADR 0018 community boards](docs/decisions/0018-bounded-moderable-community-boards.md),
-[ADR 0019 spatial voice](docs/decisions/0019-bounded-spatial-voice.md) and the
-[social, staff and loot roadmap](docs/design/social-staff-and-loot-roadmap.md).
-Administrative authority stays separate from progression: XP improves the
-playable character, while a separate designation assigns profile and
-capabilities with a durable audit.
-
-## Scenes and media
-
-Artwork sets the mood; text carries the game. Opaque AVIF/WebP/JPEG backgrounds
-and transparent WebP/PNG sprites use bounded manifests with dimensions, hashes,
-license, provenance, human review and localized alternative text. Save-Data,
-disabled media and screen-reader mode avoid image requests; audio starts off and
-requires a user gesture. Plain Telnet keeps everything; GMCP, MXP/MSLP, ANSI and
-native graphics are optional and consented.
-
-The pipeline and browser can compose sprites of already-visible NPCs/objects
-deterministically and within bounds. There is not yet a reviewed demonstration
-sprite set, separate player composition or a visual tombstone. The
-[compositor design](docs/design/scene-compositor-v1.md) keeps these limits
-explicit.
-
-## Authoring: WorldPack and AreaPack
+## Authoring a world
 
 ![Technical illustration of the three Lantern Square rooms and their media, perception, variant, script and test modules.](docs/images/tiamud-worldpack.webp)
 
-The runtime consumes **one canonical WorldPack v10**. To work with less coupling,
-authors split a **WorldProject v2** into **AreaPack v9** with declared
-dependencies and ownership, then compose them offline:
+The runtime consumes one canonical **WorldPack v10**. Authors split a
+**WorldProject v2** into **AreaPack v9** modules and compose them offline:
 
 ```sh
 mkdir -p build/worlds
@@ -300,199 +432,182 @@ cargo run --locked -p world-pack --bin tiamud-world -- compose \
   --output build/worlds/lantern-square.composed.world.json
 ```
 
-The local 6A path catalogs verifiable area revisions and bundles in a local
-registry. `area-publish` publishes the catalog, bundles and a fallback WorldPack
-under a per-world advisory lock and prints the exact content-addressed path;
-`area-verify` is a read-only check of the published catalog:
-
-```sh
-cargo run --locked -p world-pack --bin tiamud-world -- area-publish \
-  worlds/lantern-square.project.json \
-  --release worlds/lantern-square.area-release.json \
-  --registry build/area-registry
-
-cargo run --locked -p world-pack --bin tiamud-world -- area-verify \
-  --catalog build/area-registry/area-catalogs/<world-key>/<catalog-digest>.catalog.json \
-  --registry build/area-registry
-```
-
-The bounded catalog (≤1 MiB, 256 entries) and its immutable canonical-JSON
-bundles (≤16 MiB) separate `contentLicense=CC-BY-4.0` from
-`scriptLicense=MIT OR Apache-2.0`, pin ownership, dependencies, portals and
-digests, and use the explicit `unsigned_local` trust mode for a local registry
-on a trusted host. Catalog mode 6B boots from an exact catalog and adds verified
-areas on demand; 6C replaces a whole generation in a quiescent cutover; 6D
-reversibly retires same-generation SCC units. Details, invariants and the CLI
-are in [docs/world-authoring.md](docs/world-authoring.md), the
-[authoring guide](docs/authoring/README.md) and ADRs
-[0005](docs/decisions/0005-hot-area-lifecycle.md),
-[0020](docs/decisions/0020-additive-local-area-loading.md),
-[0021](docs/decisions/0021-quiescent-area-generation-cutover.md) and
-[0022](docs/decisions/0022-reversible-area-unit-retirement.md).
-
 | Tool | Purpose |
 | --- | --- |
-| `tiamud-world` | Compose, validate, build, diff, preview, test, publish and roll back |
-| `tiamud-assets` | Build reviewed, content-addressed media |
-| `envy-import` | Conservatively audit/convert supported Envy/Merc areas |
-| `tiamud-admin` | Integrity, migration and SQLite backup/restore |
+| `tiamud-world` | Compose, validate, build, diff, preview, test, publish and roll back worlds; `area-publish`/`area-verify` for local area catalogs |
+| `tiamud-story` | Validate, preview, test, play and format StoryPacks |
+| `tiamud-assets` | Build reviewed, content-addressed media (AVIF/WebP/JPEG/PNG) |
+| `envy-import` | Conservatively audit and convert supported Envy/Merc areas; imported programs are never executed |
+| `tiamud-admin` | SQLite integrity, migration, backup/restore and emergency `implementor` recovery |
 | `tiamud-migrate-postgres` | Move a current SQLite snapshot into an empty PostgreSQL |
 
-Imported programs are never executed. Lua hooks use declared capabilities and
-quotas on code, memory, instructions, time and events.
+Guides: [authoring](docs/authoring/README.md) ·
+[areas and catalogs](docs/world-authoring.md) ·
+[media](docs/authoring/media.md) ·
+[progression and combat](docs/authoring/progression-and-combat.md) ·
+[validation and publishing](docs/authoring/validation-and-publishing.md).
+The optional [`editorial-ai`](crates/editorial-ai/README.md) crate can draft or
+review authoring material outside the game loop; its default provider is
+`none` and every draft goes through normal validation and human review.
 
-## Accessibility and security
+## Deployment
 
-The entire game works over a plain-text stream. The browser adds semantic
-regions, a narrative log, selective announcements, native keyboard controls,
-forced colors and persistent preferences for size, contrast, motion and screen
-reader.
+| Layer | Local / private | Public single host |
+| --- | --- | --- |
+| Browser | HTTP on loopback | HTTPS/WSS behind a reverse proxy |
+| Terminal | explicit `plaintext` on localhost or a trusted LAN | direct Telnet TLS |
+| Persistence | zero-config SQLite | PostgreSQL on the same machine |
+| World | embedded WorldPack or local area catalog | reviewed external WorldPack or durable local catalog |
 
-Automated axe, keyboard, mobile and screen-reader-mode tests are retained. A
-manual validation with a real screen reader and a current WebKit run on a
-compatible host are still pending.
+- **[Single-host operation](docs/operations/single-host.md)** — Caddy, hardened
+  systemd, Telnet TLS, environment variables, story sessions, metrics, backup,
+  migration, update/rollback and emergency administrator recovery. Reference
+  files: [`deploy/`](deploy/).
+- **[mud.example.org kit](docs/operations/example-deploy.md)** —
+  a host-specific Apache/hosting-panel install/update/uninstall kit
+  ([`deploy/example/`](deploy/example/)) with PostgreSQL 18,
+  Let's Encrypt for both HTTPS and Telnet TLS (port 4100) and a pre-update
+  `pg_dump`. It was executed on 2026-10-16; see the
+  [first-install log](docs/project/log/2026-10-16-example-first-install.md)
+  for what was checked and what is still missing.
+- `/health/live` and `/health/ready` report health; `/metrics` serves
+  Prometheus on loopback only.
+- [Releases](docs/operations/releases.md) and [soak testing](docs/operations/soak-testing.md)
+  describe the release and load tooling.
 
-For a public host:
-
-- use HTTPS/WSS and direct Telnet TLS;
-- keep metrics, databases, keys, staging and backups private;
-- run under an unprivileged account and test external restores;
-- review the license of every imported area and asset; and
-- report vulnerabilities per [SECURITY.md](SECURITY.md).
-
-Untrusted messages, scripts, media and outputs are bounded. A slow client drops
-lower-value presentation first and is disconnected if it cannot flush critical
-output. `SIGTERM`/`SIGINT` close listeners, wait for accepted actions and drain
-persistence.
-
-## Optional AI
-
-No AI is needed to build, run or play. The
-[`editorial-ai`](crates/editorial-ai/README.md) crate can draft or review
-authoring material outside the game loop. The default provider is `none`; local
-endpoints are restricted to loopback and supported remote ones require explicit
-HTTPS. Every draft passes normal validation and human review.
-
-Development also declares AI assistance when it is material. A model may propose
-code, tests, text or images, but it is not an authority: changes are reviewed and
-pass the same gates.
-
-## Verification
-
-Representative local gates:
+## Verification and evidence
 
 ```sh
+cargo fmt --all -- --check
+cargo test --workspace --locked
+cargo clippy --workspace --all-targets --locked -- -D warnings
+
 pnpm --dir apps/web check
 pnpm --dir apps/web test
 pnpm --dir apps/web build
 pnpm --dir apps/web e2e
 
-cargo fmt --all -- --check
-cargo test --workspace --locked
-cargo clippy --workspace --all-targets --locked -- -D warnings
-
 bash scripts/verify-project-licenses.sh
 node scripts/generate-third-party-notices.mjs --check
 node --test scripts/bot.test.mjs scripts/verify-soak-report.test.mjs scripts/telnet-bot.test.mjs
-node scripts/smoke.mjs
 ```
 
-`cargo test --workspace --locked` also fails if any of
-`apps/web/src/lib/generated/{protocol,core,server}.ts` is stale against
-`crates/protocol`, the `tiamud-core` views or the `tiamud-server`
-`action.perform`/presentation types; regenerate them with
-`TIAMUD_UPDATE_GENERATED_PROTOCOL=1 cargo test --locked -p tiamud-protocol -p tiamud-core -p tiamud-server typescript` and review the diff.
+PostgreSQL tests need an explicit, disposable `TIAMUD_TEST_POSTGRES_URL`; never
+point them at real data. When `crates/protocol` or the projected views change,
+regenerate the TypeScript with
+`TIAMUD_UPDATE_GENERATED_PROTOCOL=1 cargo test --locked -p tiamud-protocol -p tiamud-core -p tiamud-server typescript`
+and review the diff.
 
-The baseline is verified locally per phase with formatting, strict clippy,
-workspace tests, the web client and license checks. Exact per-phase figures,
-retained evidence and unrun limits live in
-[PROJECT_MEMORY.md](docs/project/PROJECT_MEMORY.md) and in the dated logs under
-[docs/project/log/](docs/project/log/README.md).
+What the evidence does and does not show:
 
-This evidence is a local diagnostic, not CI, release or production evidence. A
-short load test does not replace a 24-hour soak; WebKit does not start on the
-current local host because of missing GTK/GStreamer/media libraries, and no
-WebKit pass or production PostgreSQL acceptance is claimed without evidence.
+- The latest local gate recorded in the [matrix](docs/project/COMPLETION_MATRIX.md)
+  (story language picker, 2026-10-16): 1,194 Rust workspace tests passed
+  (1 ignored), strict clippy and fmt, 306 Vitest tests, svelte-check 0/0 and
+  76/76 Playwright runs on Chromium and Firefox. This is **local** evidence.
+- **Hosted CI is currently blocked** before job steps by GitHub billing or
+  spending limits; there is no green CI run for the current tree.
+- **WebKit** cannot start on the current host (missing native libraries); no
+  current WebKit pass is claimed. A manual screen-reader audit is pending.
+- **No 24-hour soak** has been retained; short load and soak runs are
+  diagnostics only.
+- No tagged release with verified provenance exists yet.
 
 ## Status and roadmap
 
-Tiamud is prepared under open-source licenses and stays in the `0.1.0`
-pre-release; the canonical repository remains private until an explicit
-visibility decision. The WebSocket protocol is still experimental. The
-[completion matrix](docs/project/COMPLETION_MATRIX.md) is the authority on
-acceptance.
+| Area | Status |
+| --- | --- |
+| Core engine, single-host server, SQLite persistence, Telnet and GMCP | Complete |
+| Characters v3, inventory 3A–3D, loot 4A–4B, social 1–5E, staff | Complete |
+| Areas 6A–6C | Complete |
+| Areas 6D, group loot 4C, quests/shops as data (S8 MUD side) | Partial |
+| PostgreSQL public profile (local v16/v17 tests; public-install exercise pending) | Partial |
+| Typed protocol and generated TypeScript | Partial |
+| Narrative runtime S0–S7 (formats, tools, sessions, slots, parser, Lua, multiplayer) | Partial |
+| WCAG 2.2 AA browser matrix, 24-hour soak, reproducible release | Partial |
 
-Pending external gates:
+Next steps, from the matrix:
 
-- restore hosted GitHub Actions (currently blocked by billing/spend limit) and
-  obtain a green CI on the exact candidate;
-- a public-install exercise for PostgreSQL TLS, backup/restore, monitoring and
-  operational recovery;
-- a retained, verified 24-hour soak for the exact candidate;
-- a current WebKit run on a compatible host and a manual screen-reader test;
-- a tagged release with independently verified OIDC provenance.
-
-Next technical lines: close the retire/restart E2E, the PostgreSQL smoke and the
-6D vertical metrics before designing an automatic policy, a memory budget or LRU;
-consolidate capability-based staff; extend need/greed and master-loot beyond
-fixed loot (rolled loot and a structured web surface remain); keep paid loot
-boxes out of the baseline; publish a reviewed demonstration sprite set; and ship
-the first explicit `tiamud.v1` compatibility milestone. The full roadmap is in
-the matrix and in [PROJECT_MEMORY.md](docs/project/PROJECT_MEMORY.md).
+- close 6D acceptance (PostgreSQL smoke, end-to-end restart, bounded operator
+  surface, memory measurements) before any memory budget or LRU;
+- measure the world actor's own CPU time at 200 characters, now larger than
+  the storage cost;
+- extend shops to item-prototype stock and quest rewards to sealed rewards and
+  progression grants through the existing atomic paths;
+- publish a reviewed demonstration sprite set for the optional scene
+  compositor;
+- consider further group-loot modes only while preserving existing atomicity
+  (paid loot boxes stay out of the baseline);
+- externally: restore hosted CI, retain a 24-hour soak, run a manual
+  screen-reader pass, and produce a tagged, independently verified release.
 
 ## Repository map
 
 ```text
-apps/web/                    official Svelte 5 client
-clients/                     TinTin++ and Mudlet integrations
-crates/mud-core/             transport-independent domain and perception
-crates/mud-server/           actor, transports, persistence and embedded web
-crates/protocol/             typed tiamud.v1 wire types; generates web TypeScript
-crates/telnet-codec/         shared, fuzzed Telnet parser
-crates/cell-frame/           bounded, consented cell graphics
-crates/persistence-*/        SQLite/PostgreSQL schemas and migration
-crates/world-pack/           authoring model, composition and CLI
-crates/scripting/            quota-bounded Lua capabilities
-crates/story-core/           pure narrative ruleset prototype (StoryPack, S0)
-crates/story-tools/          offline StoryPack authoring CLI (tiamud-story, S1)
-crates/story-parser/         standalone ES/EN interactive-fiction parser library (not integrated)
-crates/asset-pipeline/       deterministic, reviewed media pipeline
-crates/editorial-ai/         optional authoring-only AI
-crates/tiamud-admin/         operator integrity and recovery
-tools/envy-import/           offline historical importer
-worlds/                      reviewed WorldPacks and area modules
-scripts/                     smoke, load, soak and licenses
-docs/                        protocol, decisions, operation and status
-deploy/                      Caddy, systemd, environment examples; example/ host kit
+apps/web/                  Svelte 5 web client (PWA)
+clients/                   TinTin++ and Mudlet integrations
+crates/mud-core/           transport-independent MUD domain and perception
+crates/mud-server/         tiamud-server: actor, transports, story sessions, persistence, embedded web
+crates/protocol/           typed tiamud.v1 wire types; generates the web TypeScript
+crates/telnet-codec/       shared, fuzzed Telnet parser
+crates/cell-frame/         bounded, consent-gated terminal graphics
+crates/persistence-sqlite/ SQLite schema, migrations and shared row contracts
+crates/persistence-postgres/ PostgreSQL adapter and SQLite→PostgreSQL mover
+crates/world-pack/         WorldPack/AreaPack model, composition and tiamud-world CLI
+crates/scripting/          quota-bounded Lua sandbox
+crates/story-core/         narrative ruleset (StoryPack v1–v3) and sample stories
+crates/story-parser/       Spanish/English interactive-fiction parser
+crates/story-script/       Lua host for StoryPack scripts
+crates/story-tools/        tiamud-story authoring CLI and JSON Schemas
+crates/asset-pipeline/     deterministic, reviewed media pipeline (tiamud-assets)
+crates/editorial-ai/       optional, authoring-only AI
+crates/tiamud-admin/       operator integrity and recovery
+tools/envy-import/         offline historical area importer
+worlds/                    reviewed Lantern Square WorldPack and area modules
+scripts/                   smoke, load, soak, bots and license checks
+deploy/                    Caddy, systemd and env examples; example/ host kit
+docs/                      protocol, decisions, authoring, operations and status
 ```
 
 ## Documentation
 
-The full documentation index is [docs/README.md](docs/README.md), which links
-the protocol, operation, authoring, decisions (ADRs), clients and status. Key
-entry points:
+The full index is [docs/README.md](docs/README.md).
 
-- **Protocol:** [`tiamud.v1`](docs/protocol/tiamud-v1.md) (experimental).
-- **Operation:** [single host](docs/operations/single-host.md).
-- **Authoring:** [WorldPack v10](docs/authoring/README.md) ·
-  [areas and catalogs](docs/world-authoring.md).
-- **Status:** [completion matrix](docs/project/COMPLETION_MATRIX.md) ·
-  [project memory](docs/project/PROJECT_MEMORY.md).
-- **Specification:** [v0.3](docs/spec-v0.3.md) (current baseline).
-- **Historical:** [v0.2 specification, in Spanish](docs/archive/spec-v0.2.md).
+| Topic | Entry points |
+| --- | --- |
+| Status | [Completion matrix](docs/project/COMPLETION_MATRIX.md) · [project memory](docs/project/PROJECT_MEMORY.md) · [dated logs](docs/project/log/README.md) |
+| Decisions | [ADR index](docs/decisions/README.md) (0001–0035) |
+| Stories | [StoryPack guide](docs/authoring/story-packs.md) · [parser guide](docs/authoring/story-parser.md) |
+| Worlds | [Authoring guide](docs/authoring/README.md) · [areas and catalogs](docs/world-authoring.md) · [workflow](docs/authoring/workflow.md) |
+| Protocol | [`tiamud.v1`](docs/protocol/tiamud-v1.md) (experimental) |
+| Operations | [Single host](docs/operations/single-host.md) · [example kit](docs/operations/example-deploy.md) · [releases](docs/operations/releases.md) · [soak](docs/operations/soak-testing.md) |
+| Design | [Character progression v3](docs/design/character-progression-v3.md) · [scene compositor](docs/design/scene-compositor-v1.md) · [social, staff and loot roadmap](docs/design/social-staff-and-loot-roadmap.md) |
+| Specification | [v0.3](docs/spec-v0.3.md) (current baseline) · [v0.2, Spanish, historical](docs/archive/spec-v0.2.md) |
+| Security | [SECURITY.md](SECURITY.md) |
 
 Internal governance documents (`AGENTS.md`, `CLAUDE.md`, the project memory,
-matrix, ADRs and dated logs) are maintained in Spanish; the public-facing docs
-listed above are in English.
+matrix, ADRs and dated logs) are maintained in Spanish; public-facing guides
+are in English.
 
 ## Contributing
 
-Issues and pull requests are welcome. Domain behavior must be
-transport-neutral; all untrusted input must be bounded, and changes need focused
-tests and honest documentation.
+Issues and pull requests are welcome. Before changing anything, read
+[AGENTS.md](AGENTS.md): it is the contract for every contributor, human or AI,
+and defines the invariants (single writer, one backend, browser/Telnet parity,
+bounded input, honest status) and the required checks.
 
-Do not submit historical code, areas, help or media without clear redistribution
-rights. Compatibility does not imply a license.
+- Domain behaviour must be transport-neutral and fixed at the authoritative
+  boundary, with focused tests.
+- Persistence changes normally need SQLite/PostgreSQL parity and a migration;
+  protocol changes need Rust, strict TypeScript, Playwright and Telnet/GMCP
+  parity.
+- Changes to accepted architecture need an [ADR](docs/decisions/README.md)
+  first; material changes update the matrix, the project memory and a dated log.
+- Do not submit historical code, areas, help or media without clear
+  redistribution rights. Compatibility does not imply a license.
+
+Material AI assistance in development is declared in the project logs; model
+output is reviewed and passes the same gates. No AI is needed to build, run or
+play Tiamud.
 
 ## License
 
