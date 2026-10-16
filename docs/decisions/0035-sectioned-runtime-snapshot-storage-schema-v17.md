@@ -169,3 +169,20 @@ cambios mínimos, y para eso hay una salida más simple (ver "Trabajo futuro").
   por hash del id) cuyo estado sucio se derive comparando el rango del cubo con
   la línea base, si una medición con SQL real lo justifica.
 - Ejecutar las pruebas PostgreSQL v17 escritas contra un servidor real.
+
+## Nota del 2026-10-16: medición con SQL real de los cubos de `itemInstances`
+
+La medición de rutas calientes se ejecutó contra SQLite en fichero (WAL,
+`synchronous = FULL`) y PostgreSQL 18.6 local con la configuración por
+defecto, con un umbral fijado antes de medir: los cubos se justifican solo si
+a 200 personajes, en algún backend, el p95 de commit de `take`/`drop` supera
+10 ms (SQLite) o 20 ms (PostgreSQL) **y** el doble del p95 de commit de
+`move`. En tres ejecuciones el p95 de objeto fue 51–53 ms en SQLite (1,35–1,91
+veces el de `move`) y 16–20 ms en PostgreSQL (1,14–1,41 veces): el coste fijo
+del fsync domina y el marginal de la sección de ~0,82 MB es ~4–6 ms p50.
+**Decisión: no se parte `itemInstances`;** el esquema sigue en v17 (los
+cubos requerirían ampliar el `CHECK` cerrado de secciones, es decir, un
+esquema nuevo). Las pruebas PostgreSQL v17 ya se ejecutaron en local el mismo
+día. Ver el
+[registro](../project/log/2026-10-16-item-instances-bucketing-measurement.md);
+es evidencia local y diagnóstica, no de CI ni de producción.
