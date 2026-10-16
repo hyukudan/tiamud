@@ -174,12 +174,15 @@ This automation is not a substitute for a real assistive-technology pass. A
 manual screen-reader audit is still pending. In the final combined invocation
 of the 2026-10-15 web-client change all 26 scenarios passed in both Chromium
 and Firefox (52 runs), including the mobile 44 px touch-target and simulated
-on-screen keyboard checks. WebKit discovers the same 26 scenarios but could not load
-on the most recent validation host because the required GTK/GStreamer, media
-and related runtime libraries were absent; this is neither an observed
-application failure nor a current WebKit pass. A retained
-historical log records an earlier WebKit run with a temporary user-space
-host-library setup. The authoritative current status is kept in the project's
+on-screen keyboard checks. On 2026-10-16 hosted CI ran the full Playwright
+suite in Chromium, Firefox and Playwright's WebKit build, and every scenario
+passed after two WebKit-only fixes: the command line now sends an unmodified
+Enter on keydown, because WebKit's `<datalist>` suggestion handling could
+swallow the implicit form submit, and the WebKit project blocks the production
+service worker, which otherwise hides the page's requests from `page.route`
+mocks. That is CI evidence for an engine build, not a Safari or real-device
+pass. The current local host still lacks the native GTK/GStreamer libraries
+WebKit needs. The authoritative current status is kept in the project's
 private completion records.
 
 ## License
